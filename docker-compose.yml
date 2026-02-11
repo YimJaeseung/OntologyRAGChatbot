@@ -1,0 +1,50 @@
+services:
+  # 1. OpenSearch (Vector DB)
+  opensearch:
+    image: opensearchproject/opensearch:2.11.0
+    container_name: rag-vectordb
+    environment:
+      - discovery.type=single-node
+      - plugins.security.disabled=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+
+  # 2. TypeDB (Graph DB)
+  typedb:
+    image: vaticle/typedb:latest
+    container_name: rag-graphdb
+    ports:
+      - "1729:1729"
+    volumes:
+      - typedb-data:/opt/typedb-all/server/data
+
+  # 3. Backend (FastAPI)
+  backend:
+    build: ./backend
+    container_name: rag-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENSEARCH_URL=http://opensearch:9200
+      - TYPEDB_ADDRESS=typedb:1729
+      - VLLM_API_URL=${VLLM_API_URL}
+    depends_on:
+      - opensearch
+      - typedb
+
+  # 4. Frontend (React + Nginx)
+  frontend:
+    build: ./frontend
+    container_name: rag-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  opensearch-data:
+  typedb-data:

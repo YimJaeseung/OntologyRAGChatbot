@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+opensearch-py
+typedb-driver
+openai
+pydantic
+python-dotenv
