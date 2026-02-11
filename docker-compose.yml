@@ -15,7 +15,8 @@ services:
 
   # 2. TypeDB (Graph DB)
   typedb:
-    image: vaticle/typedb:latest
+    image: typedb/typedb:3.7.0
+
     container_name: rag-graphdb
     ports:
       - "1729:1729"
@@ -32,9 +33,12 @@ services:
       - OPENSEARCH_URL=http://opensearch:9200
       - TYPEDB_ADDRESS=typedb:1729
       - VLLM_API_URL=${VLLM_API_URL}
+      - SCHEMA_PATH=/app/schema.tql
     depends_on:
       - opensearch
       - typedb
+    volumes:
+      - ./init_data/schema.tql:/app/schema.tql
 
   # 4. Frontend (React + Nginx)
   frontend:

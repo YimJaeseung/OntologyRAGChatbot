@@ -1,0 +1,250 @@
+define
+
+  # --------------------------------------
+  # 0. Global Attributes & Relations
+  # --------------------------------------
+  # [Attributes]
+  attribute id-serial-number, value string;
+  attribute id-party-id, value string;
+  attribute id-doc-id, value string;
+  attribute id-chunk-id, value string;
+  attribute id-location-id, value string;
+  attribute code-error, value string;
+
+  attribute name, value string;
+  attribute title, value string;
+  attribute description, value string;
+  attribute content-text, value string;
+  attribute file-type, value string;
+  attribute model-name, value string;
+  attribute manufacturer, value string;
+  attribute unit, value string;
+  attribute severity, value string;
+  attribute timestamp, value datetime;
+  attribute date-action, value datetime;
+
+  attribute email, value string;
+  attribute phone, value string;
+  attribute role-grade, value string;
+  attribute department, value string;
+  
+  attribute version, value string;
+  attribute language, value string;
+  attribute status, value string;       # Draft, Published, Archived
+  attribute row-index, value integer;      # 엑셀 행 번호
+  attribute page-number, value integer;    # PDF 페이지 번호
+  
+  attribute created-date, value datetime;
+  attribute target-model, value string;
+  attribute valid-period, value string;
+  attribute issuer, value string;
+
+  # [Relations]
+  relation assembly,
+    relates system,
+    relates part;
+
+  relation location,
+    relates located-item,
+    relates place;
+
+  relation monitoring,
+    relates observer,
+    relates target;
+
+  relation state-change,
+    relates affected-asset,
+    relates defined-state,
+    owns timestamp;
+
+  relation containment,
+    relates container,
+    relates content;
+
+  relation knowledge-link,
+    relates source,
+    relates related-hardware,
+    relates related-topic;
+
+  relation maintenance,
+    relates performed-action,
+    relates performer,
+    relates target-asset,
+    relates guide;
+
+  relation responsibility,
+    relates responsible,
+    relates subject-area;
+
+  relation authorship,
+    relates author,
+    relates created-content;
+
+  relation reporting,
+    relates reporter,
+    relates reported-state,
+    relates evidence,    
+    owns timestamp;
+
+  relation citation,
+    relates quoter,      
+    relates quoted;      
+
+  relation mention,
+    relates source,
+    relates target;
+
+  # --------------------------------------
+  # WORLD 1: PHYSICAL WORLD (물리적 자산)
+  # --------------------------------------
+
+  # === L1: Abstract Concepts (추상적 개념) ===
+  entity physical-asset,
+    owns id-serial-number,
+    owns model-name,
+    owns manufacturer,
+    plays location:located-item,
+    plays state-change:affected-asset,
+    plays maintenance:target-asset,
+    plays mention:target,
+    plays knowledge-link:related-hardware;
+
+  entity space,
+    owns id-location-id,
+    owns name,
+    plays location:place,
+    plays responsibility:subject-area;
+
+  # === L2: Industry Standards (산업 공통 분류) ===
+  entity equipment,
+    sub physical-asset,
+    plays assembly:system,
+    plays mention:target;
+
+  entity component,
+    sub physical-asset,
+    plays assembly:part,
+    plays mention:target;
+
+  entity sensor,
+    sub physical-asset,
+    owns unit,
+    plays mention:target,
+    plays monitoring:observer;
+
+  entity site, sub space;
+  entity zone, sub space;
+
+  # === L3: Company Specifics (개별 기업/현장 구체화) ===
+  # 예시: 특정 회사의 설비 유형
+  # entity pump, sub equipment;
+  # entity motor, sub component;
+
+  # --------------------------------------
+  # WORLD 2: DOCUMENT WORLD (지식 자산)
+  # --------------------------------------
+
+  # === L1: Abstract Concepts ===
+  entity knowledge-resource,
+    owns title,
+    owns created-date,
+    plays knowledge-link:source,
+    plays maintenance:guide,
+    plays authorship:created-content;
+
+  # === L2: Structure & Format (형식적 분류) ===
+  entity document-file,
+    sub knowledge-resource,
+    owns id-doc-id,
+    owns file-type,
+    owns version,
+    owns language,
+    owns status,
+    plays containment:container;
+
+  entity content-unit,
+    sub knowledge-resource,
+    owns id-chunk-id,
+    owns content-text,
+    plays containment:content;
+
+  # === L3: Business Context (비즈니스 목적별 분류) ===
+  
+  # 1. 지침서 (Manual, SOP)
+  entity manual,
+    sub document-file,
+    owns target-model;
+
+  # 2. 보고서 (Report, Log)
+  entity report,
+    sub document-file,
+    plays reporting:evidence;
+
+  # 3. 규격서 (Spec)
+  entity specification,
+    sub document-file,
+    owns valid-period;
+
+  # 4. 외부 표준 (Standard)
+  entity standard,
+    sub document-file,
+    owns issuer;
+
+  # 5. 청크 타입 (데이터 형태)
+  entity text-chunk,
+    sub content-unit,
+    owns page-number
+    plays mention:source;
+
+  entity table-row,
+    sub content-unit,
+    owns row-index
+    plays mention:source;
+
+  # --------------------------------------
+  # WORLD 3: ACTORS & EVENTS (주체 및 행위)
+  # --------------------------------------
+
+  # === L1 ===
+  entity party,
+    owns id-party-id,
+    owns name,
+    owns email,
+    owns phone,
+    plays responsibility:responsible,
+    plays maintenance:performer,
+    plays reporting:reporter,
+    plays authorship:author;
+
+  entity operational-state,
+    owns code-error,
+    owns description,
+    owns severity,
+    plays state-change:defined-state,
+    plays reporting:reported-state,
+    plays knowledge-link:related-topic;
+
+  entity action,
+    owns date-action,
+    plays maintenance:performed-action;
+
+  # === L2 ===
+  entity engineer,
+    sub party,
+    owns role-grade,
+    owns department;
+
+  entity operator,
+    sub party,
+    owns department;
+
+  entity manager,
+    sub party,
+    owns department;
+
+  entity fault, sub operational-state;
+  entity alarm, sub operational-state;
+  entity maintenance-activity, sub action;
+
+  
+  # === L3 ===

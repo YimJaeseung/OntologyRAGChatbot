@@ -1,7 +1,13 @@
 fastapi
 uvicorn
-opensearch-py
-typedb-driver
-openai
-pydantic
+python-multipart
 python-dotenv
+typedb-driver
+opensearch-py
+openai
+pandas
+openpyxl
+pdfplumber
+langchain
+langchain-text-splitters
+requests

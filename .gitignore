@@ -1,0 +1,28 @@
+#로그파일
+logs/
+*.log
+
+# Python 캐시 파일
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# 가상 환경
+venv/
+env/
+.venv/
+
+# 패키지 관리
+*.egg-info/
+dist/
+build/
+
+# 환경 설정
+.env
+.env.local
+
+GEMINI.md
+
+generate_data.py
+run_upload.py
+verify_db.py
