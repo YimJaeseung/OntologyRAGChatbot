@@ -87,8 +87,8 @@ define
     owns timestamp;
 
   relation citation,
-    relates quoter,      
-    relates quoted;      
+    relates source,      
+    relates target;      
 
   relation mention,
     relates source,
@@ -107,7 +107,8 @@ define
     plays state-change:affected-asset,
     plays maintenance:target-asset,
     plays mention:target,
-    plays knowledge-link:related-hardware;
+    plays knowledge-link:related-hardware,
+    plays citation:target;
 
   entity space,
     owns id-location-id,
@@ -118,18 +119,15 @@ define
   # === L2: Industry Standards (산업 공통 분류) ===
   entity equipment,
     sub physical-asset,
-    plays assembly:system,
-    plays mention:target;
+    plays assembly:system;
 
   entity component,
     sub physical-asset,
-    plays assembly:part,
-    plays mention:target;
+    plays assembly:part;
 
   entity sensor,
     sub physical-asset,
     owns unit,
-    plays mention:target,
     plays monitoring:observer;
 
   entity site, sub space;
@@ -160,7 +158,9 @@ define
     owns version,
     owns language,
     owns status,
-    plays containment:container;
+    plays containment:container,
+    plays citation:source,
+    plays citation:target;
 
   entity content-unit,
     sub knowledge-resource,
@@ -193,12 +193,12 @@ define
   # 5. 청크 타입 (데이터 형태)
   entity text-chunk,
     sub content-unit,
-    owns page-number
+    owns page-number,
     plays mention:source;
 
   entity table-row,
     sub content-unit,
-    owns row-index
+    owns row-index,
     plays mention:source;
 
   # --------------------------------------

@@ -20,6 +20,9 @@ services:
     container_name: rag-graphdb
     ports:
       - "1729:1729"
+      - "8001:8000"
+    environment:
+      - TYPEDB_SERVER_ADDRESS=0.0.0.0
     volumes:
       - typedb-data:/opt/typedb-all/server/data
 
@@ -33,12 +36,12 @@ services:
       - OPENSEARCH_URL=http://opensearch:9200
       - TYPEDB_ADDRESS=typedb:1729
       - VLLM_API_URL=${VLLM_API_URL}
-      - SCHEMA_PATH=/app/schema.tql
+      - SCHEMA_PATH=/init_data/schema.tql
     depends_on:
       - opensearch
       - typedb
     volumes:
-      - ./init_data/schema.tql:/app/schema.tql
+      - ./init_data/schema.tql:/init_data/schema.tql
 
   # 4. Frontend (React + Nginx)
   frontend:

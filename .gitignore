@@ -26,3 +26,7 @@ GEMINI.md
 generate_data.py
 run_upload.py
 verify_db.py
+
+#더미데이터
+sample_pump_manual.pdf
+sensor_catalog.xlsx

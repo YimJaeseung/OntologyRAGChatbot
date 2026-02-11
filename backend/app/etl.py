@@ -50,16 +50,16 @@ class SchemaManager:
             print(f"⚠️ Invalid parent '{l2_parent}'. Fallback to 'document-file'")
             l2_parent = "document-file"
 
-        # TypeDB 3.7 방식: driver.transaction() 직접 호출
+        # TypeDB 3.7 표준: driver -> transaction
         with TypeDB.driver(self.uri, self.creds, self.opts) as driver:
-            # 1. 존재 여부 확인 (READ 트랜잭션)
-            try:
-                with driver.transaction(self.db_name, TransactionType.READ) as tx:
+            # 1. 존재 확인 (쿼리 방식)
+            with driver.transaction(self.db_name, TransactionType.READ) as tx:
+                try:
+                    # 해당 타입이 존재하는지 concepts API로 확인
                     if tx.concepts.get_entity_type(slug_l3).resolve():
-                        self._known_types.add(slug_l3)
                         return slug_l3
-            except Exception:
-                pass 
+                except Exception:
+                    pass # 타입이 없으면 아래 정의 로직으로 이동
 
             # 2. 없으면 정의 (SCHEMA 트랜잭션)
             print(f"🆕 Defining New L3 Type: '{slug_l3}' (sub {l2_parent})")
@@ -80,7 +80,7 @@ class SchemaManager:
 class DynamicETL:
     def __init__(self):
         self.typedb_uri = os.getenv("TYPEDB_ADDRESS", "localhost:1729")
-        self.db_name = "rag_ontology"
+        self.db_name = os.getenv("TYPEDB_DATABASE", "rag_ontology")
         self.creds = Credentials("admin", "password")
         self.opts = DriverOptions(is_tls_enabled=False)
         
@@ -95,6 +95,29 @@ class DynamicETL:
         )
         # SchemaManager 생성 시 올바른 변수 전달
         self.schema_mgr = SchemaManager(self.typedb_uri, self.db_name)
+        
+        # OpenSearch 인덱스 초기화 (Mapping 설정)
+        self._initialize_index()
+
+    def _initialize_index(self):
+        if not self.os_client.indices.exists(index=self.index_name):
+            print(f"⚙️ Creating OpenSearch index '{self.index_name}' with k-NN mapping...")
+            body = {
+                "settings": {"index.knn": True},
+                "mappings": {
+                    "properties": {
+                        "vector_field": {
+                            "type": "knn_vector",
+                            "dimension": 1536,  # text-embedding-3-small dimension
+                            "method": {"name": "hnsw", "engine": "nmslib"}
+                        },
+                        "text": {"type": "text"},
+                        "chunk_id": {"type": "keyword"}
+                    }
+                }
+            }
+            self.os_client.indices.create(index=self.index_name, body=body)
+            print("✅ OpenSearch index created.")
 
     def get_embedding(self, text: str) -> List[float]:
         try:
@@ -126,7 +149,7 @@ class DynamicETL:
             return {"l3_name": "General Doc", "l2_parent": "document-file"}
 
     def insert_to_typedb(self, tql_query):
-        # TypeDB 3.7 방식: driver.transaction(db_name, type)
+        # TypeDB 3.7 표준: driver -> transaction
         with TypeDB.driver(self.typedb_uri, self.creds, self.opts) as driver:
             with driver.transaction(self.db_name, TransactionType.WRITE) as tx:
                 tx.query(tql_query)
@@ -168,24 +191,31 @@ class DynamicETL:
         # 1. 엔티티 생성 및 청크와 연결 (mention)
         for ent in graph_data.get("entities", []):
             name = ent['name'].replace('"', "'")
-            ent_type = ent['type'] # equipment, sensor 등
+            ent_type = ent['type']
             
-            # 엔티티가 없으면 생성하고, 청크와 mention 관계로 연결
-            query = f"""
+            # 1. 엔티티 존재 확인
+            check_ent = list(tx.query(f'match $e isa {ent_type}, has name "{name}"; get;'))
+            
+            # 2. 없으면 생성
+            if not check_ent:
+                tx.query(f'insert $e isa {ent_type}, has name "{name}";')
+            
+            # 3. 관계 연결 
+            link_query = f"""
             match $c isa content-unit, has id-chunk-id "{chunk_id}";
-            insert 
-                $e isa {ent_type}, has name "{name}";
-                (source: $c, target: $e) isa mention;
+                  $e isa {ent_type}, has name "{name}";
+            insert (source: $c, target: $e) isa mention;
             """
-            try: tx.query(query)
-            except: pass
+            tx.query(link_query)
 
         # 2. 관계 생성 (part-of, monitors 등)
         for rel in graph_data.get("relations", []):
-            rel_type = rel['type'] # part-of
+            rel_type = rel['type'] 
             from_name = rel['from'].replace('"', "'")
             to_name = rel['to'].replace('"', "'")
             
+            # schema.tql의 관계 정의에 맞춰 role을 매핑해야 함 (예: assembly)
+            # 여기서는 범용적으로 source/target 혹은 parent/child 관계를 시도
             query = f"""
             match 
                 $f isa physical-asset, has name "{from_name}";
@@ -226,7 +256,6 @@ class DynamicETL:
         # --- 핵심 수정: 트랜잭션을 열고 루프 내에서 그래프 추출 수행 ---
         with TypeDB.driver(self.typedb_uri, self.creds, self.opts) as driver:
             with driver.transaction(self.db_name, TransactionType.WRITE) as tx:
-                
                 if is_excel and df is not None:
                     for idx, row in df.iterrows():
                         row_id = f"{doc_id}_r{idx}"
