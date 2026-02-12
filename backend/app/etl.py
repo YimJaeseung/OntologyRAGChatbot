@@ -84,13 +84,16 @@ class DynamicETL:
         self.creds = Credentials("admin", "password")
         self.opts = DriverOptions(is_tls_enabled=False)
         
+        # [최적화] TypeDB 드라이버를 인스턴스 변수로 유지하여 재사용
+        self.driver = TypeDB.driver(self.typedb_uri, self.creds, self.opts)
+        
         self.os_client = OpenSearch(
             hosts=[os.getenv("OPENSEARCH_URL", "http://localhost:9200")],
             http_auth=None, use_ssl=False
         )
         self.index_name = "rag-docs"
         self.llm_client = OpenAI(
-            base_url=os.getenv("VLLM_API_URL", "http://localhost:8000/v1"),
+            base_url=os.getenv("VLLM_API_URL", "http://100.111.233.70:8000/v1"),
             api_key="EMPTY"
         )
         # SchemaManager 생성 시 올바른 변수 전달
@@ -118,6 +121,11 @@ class DynamicETL:
             }
             self.os_client.indices.create(index=self.index_name, body=body)
             print("✅ OpenSearch index created.")
+
+    def close(self):
+        """리소스 해제"""
+        self.driver.close()
+        self.os_client.close()
 
     def get_embedding(self, text: str) -> List[float]:
         try:
@@ -150,10 +158,9 @@ class DynamicETL:
 
     def insert_to_typedb(self, tql_query):
         # TypeDB 3.7 표준: driver -> transaction
-        with TypeDB.driver(self.typedb_uri, self.creds, self.opts) as driver:
-            with driver.transaction(self.db_name, TransactionType.WRITE) as tx:
-                tx.query(tql_query)
-                tx.commit()
+        with self.driver.transaction(self.db_name, TransactionType.WRITE) as tx:
+            tx.query(tql_query)
+            tx.commit()
 
     def insert_to_opensearch(self, chunk_id, text, vector, metadata):
         doc = {
@@ -254,8 +261,7 @@ class DynamicETL:
         self.insert_to_typedb(tql_doc)
 
         # --- 핵심 수정: 트랜잭션을 열고 루프 내에서 그래프 추출 수행 ---
-        with TypeDB.driver(self.typedb_uri, self.creds, self.opts) as driver:
-            with driver.transaction(self.db_name, TransactionType.WRITE) as tx:
+        with self.driver.transaction(self.db_name, TransactionType.WRITE) as tx:
                 if is_excel and df is not None:
                     for idx, row in df.iterrows():
                         row_id = f"{doc_id}_r{idx}"

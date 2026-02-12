@@ -35,7 +35,7 @@ services:
     environment:
       - OPENSEARCH_URL=http://opensearch:9200
       - TYPEDB_ADDRESS=typedb:1729
-      - VLLM_API_URL=${VLLM_API_URL}
+      - VLLM_API_URL=http://100.111.233.70:8000/v1
       - SCHEMA_PATH=/init_data/schema.tql
     depends_on:
       - opensearch

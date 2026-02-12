@@ -82,6 +82,9 @@ async def lifespan(app: FastAPI):
             time.sleep(5)
     yield
     print("🚀 LIFESPAN END")
+    if etl_processor:
+        print("🛑 Closing ETL Processor resources...")
+        etl_processor.close()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -96,84 +99,6 @@ app.add_middleware(
 # ETL 인스턴스 생성
 etl_processor = None
 
-# ---------------------------------------------------------
-# [3] RAG Chat API (Hybrid Search)
-# ---------------------------------------------------------
-class ChatRequest(BaseModel):
-    text: str
-
-@app.post("/api/chat")
-async def chat(req: ChatRequest):
-    question = req.text
-    print(f"💬 Received Question: {question}")
-
-    # 1. OpenSearch Vector Search (유사도 검색)
-    vector_results = []
-    try:
-        query_vec = etl_processor.get_embedding(question)
-        os_query = {
-            "size": 3,
-            "query": {
-                "knn": {
-                    "vector_field": {
-                        "vector": query_vec,
-                        "k": 3
-                    }
-                }
-            }
-        }
-        os_res = etl_processor.os_client.search(index=etl_processor.index_name, body=os_query)
-        vector_results = [hit['_source']['text'] for hit in os_res['hits']['hits']]
-        print(f"🔍 OpenSearch Found: {len(vector_results)} chunks")
-    except Exception as e:
-        print(f"⚠️ OpenSearch Error: {e}")
-
-    # 2. TypeDB Graph Search (키워드 기반 연결 탐색)
-    graph_results = []
-    try:
-        # 간단히 질문에 포함된 단어로 엔티티를 찾고, 연결된 텍스트를 조회
-        # (실제로는 LLM으로 엔티티를 추출하면 더 정확합니다)
-        words = question.split()
-        with TypeDB.driver(os.getenv("TYPEDB_ADDRESS", "localhost:1729"), Credentials("admin", "password"), DriverOptions(is_tls_enabled=False)) as driver:
-            with driver.transaction("rag_ontology", TransactionType.READ) as tx:
-                for word in words:
-                    if len(word) < 2: continue
-                    # 해당 단어가 이름에 포함된 자산(Asset)과 연결된 텍스트 조회
-                    tql = f"""
-                    match 
-                    $e isa physical-asset, has name $n; 
-                    $n contains "{word}";
-                    (target: $e, source: $c) isa mention;
-                    $c has content-text $text;
-                    get $text;
-                    """
-                    # 환경에 맞춰 tx.query() 함수 호출 방식으로 수정
-                    for ans in tx.query(tql):
-                        graph_results.append(ans.get("text").as_attribute().get_value())
-        print(f"🕸️ TypeDB Found: {len(graph_results)} related chunks")
-    except Exception as e:
-        print(f"⚠️ TypeDB Search Error: {e}")
-
-    # 3. Context 결합 및 LLM 답변 생성
-    context = "\n\n".join(list(set(vector_results + graph_results)))
-    
-    system_prompt = "You are an industrial AI assistant. Answer based on the context below."
-    user_prompt = f"Context:\n{context}\n\nQuestion: {question}"
-    
-    try:
-        response = etl_processor.llm_client.chat.completions.create(
-            model="Qwen/Qwen2.5-7B-Instruct",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.1
-        )
-        answer = response.choices[0].message.content
-        return {"answer": answer, "context": context}
-    except Exception as e:
-        return {"answer": "죄송합니다. 답변을 생성하는 중 오류가 발생했습니다.", "error": str(e)}
-
 @app.post("/api/upload")
 async def upload_document(file: UploadFile = File(...)):
     try:
@@ -187,3 +112,15 @@ async def upload_document(file: UploadFile = File(...)):
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+from app.rag import hybrid_search
+
+class ChatRequest(BaseModel):
+    text: str
+
+@app.post("/api/chat")
+async def chat_endpoint(request: ChatRequest):
+    print(f"💬 Received Question: {request.text}")
+    # rag.py의 하이브리드 검색 호출
+    answer = await hybrid_search(request.text, etl_processor)
+    return {"answer": answer}

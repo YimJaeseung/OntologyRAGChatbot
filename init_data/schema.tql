@@ -100,6 +100,7 @@ define
 
   # === L1: Abstract Concepts (추상적 개념) ===
   entity physical-asset,
+    owns name,
     owns id-serial-number,
     owns model-name,
     owns manufacturer,
