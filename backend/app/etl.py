@@ -354,7 +354,7 @@ class DynamicETL:
         """각 청크에 대해 LLM을 호출하여 엔티티와 관계를 추출 (엑셀은 배치 처리)"""
         
         tasks = []
-        sem = asyncio.Semaphore(3) # [Optimized] 동시 실행 수를 3으로 줄여 안정성 확보
+        sem = asyncio.Semaphore(10) # [Optimized] 동시 실행 수를 3으로 줄여 안정성 확보
 
         # 엑셀 행(table-row)과 일반 텍스트 청크 분리
         table_row_chunks = [c for c in chunks if c['type'] == 'table-row']
@@ -370,7 +370,7 @@ class DynamicETL:
             tasks.append(extract_single_task(chunk))
 
         # 2. 엑셀 행은 배치로 묶어 처리
-        BATCH_SIZE = 20 
+        BATCH_SIZE = 50 
         if table_row_chunks:
             print(f"📊 Batching {len(table_row_chunks)} table rows into batches of {BATCH_SIZE}...")
         
