@@ -172,6 +172,8 @@ class SchemaManager:
         # 관계 타입 이름을 표준화 (매핑된 키가 있으면 그것 사용)
         if slug_rel in ["part-of", "composition"]:
             slug_rel = "assembly"
+        if slug_rel in ["requester", "responsible", "managed-by"]:
+            slug_rel = "responsibility"
 
         # 1. 존재 확인 및 충돌 처리
         # [Fix] 이미 알려진 관계라면 DB 확인 및 이름 변경 스킵

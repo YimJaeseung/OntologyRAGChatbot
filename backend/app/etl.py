@@ -95,23 +95,48 @@ class DynamicETL:
     def extract_graph_data(self, text: str) -> Dict:
         """[Level 3] LLM을 통한 엔티티 및 관계 추출"""
         valid_types = ", ".join(self.schema_mgr.valid_parents)
-        prompt = f"""
-        Extract industrial knowledge from the text.
-        Identify specific entity types (L3) and their parent categories (L2).
-        Identify relationships between entities (e.g., connection, part-of, location).
-        Parent categories (L2) should be one of: [{valid_types}].
         
-        [Constraints]
-        - Do NOT extract 'date', 'time', 'level', 'status', 'description' as Entity Types. These are attributes.
-        - Do NOT create generic types like 'site-equipment', 'unnamed-level'. Use specific types.
-        - 'sub-project' should be classified as 'project'.
+        # [Improvement] Few-shot 예시를 통한 명시적 가이드 (제약조건 나열 대신)
+        prompt = f"""
+        You are an expert Industrial Knowledge Graph Engineer.
+        Extract structured knowledge from the text into a JSON format.
+
+        [Definitions]
+        - **Equipment**: Physical machines and devices (e.g., Pump, Motor, Robot).
+        - **Component**: Parts belonging to equipment (e.g., Bearing, Valve, Cable).
+        - **Site**: Physical locations (e.g., Factory, Zone, Room).
+        - **Operator/Manager**: People, teams, or departments (NOT equipment).
+        - **Fault/Alarm**: Error codes, symptoms, or issues.
+
+        [Rules]
+        1. **Entities**: Identify specific L3 types and their L2 parent from: [{valid_types}].
+           - Ignore attributes like dates, IDs, status, or generic terms (e.g., "item", "part").
+        2. **Relations**: Identify connections like 'assembly' (part-of), 'location' (at), 'responsibility' (by), 'connection'.
+        
+        [Example]
+        Input: "The Centrifugal Pump (P-101) in Zone A was inspected by the Maintenance Team. Found a crack in the seal."
+        Output: {{
+          "entities": [
+            {{ "name": "P-101", "type": "centrifugal-pump", "parent_type": "equipment" }},
+            {{ "name": "Zone A", "type": "zone", "parent_type": "site" }},
+            {{ "name": "Maintenance Team", "type": "team", "parent_type": "operator" }},
+            {{ "name": "seal", "type": "seal", "parent_type": "component" }},
+            {{ "name": "crack", "type": "crack", "parent_type": "fault" }}
+          ],
+          "relations": [
+            {{ "from": "P-101", "to": "Zone A", "type": "location" }},
+            {{ "from": "Maintenance Team", "to": "P-101", "type": "responsibility" }},
+            {{ "from": "seal", "to": "P-101", "type": "assembly" }},
+            {{ "from": "crack", "to": "seal", "type": "caused-by" }}
+          ]
+        }}
 
         Return ONLY a JSON object with this structure:
         {{
           "entities": [{{ "name": "Pump A", "type": "centrifugal-pump", "parent_type": "equipment" }}],
           "relations": [{{ "from": "Pump A", "to": "System B", "type": "assembly" }}]
         }}
-        Text: "{text[:1000]}"
+        Text: "{text[:2000]}"
         """
         try:
             response = self.llm_client.chat.completions.create(
@@ -122,6 +147,62 @@ class DynamicETL:
             )
             return json.loads(response.choices[0].message.content)
         except:
+            return {"entities": [], "relations": []}
+
+    def extract_graph_data_batch(self, texts: List[str]) -> Dict:
+        """[Level 3] LLM을 통한 여러 행의 엔티티 및 관계 일괄 추출"""
+        valid_types = ", ".join(self.schema_mgr.valid_parents)
+        # Combine the JSON strings of rows into a larger JSON array string
+        json_array_of_rows = "[" + ",".join(texts) + "]"
+        
+        prompt = f"""
+        You are an expert Industrial Knowledge Graph Engineer.
+        Analyze the JSON array of table rows. Consolidate knowledge into a single graph.
+
+        [Definitions]
+        - **Equipment**: Physical machines (e.g., Pump, Motor).
+        - **Component**: Parts (e.g., Bearing, Valve).
+        - **Site**: Locations (e.g., Factory, Zone).
+        - **Operator/Manager**: People/Teams (NOT equipment).
+
+        [Rules]
+        1. **Entities**: Extract L3 types and L2 parents from: [{valid_types}].
+           - Ignore: Dates, IDs, Part Numbers, Status, Descriptions.
+        2. **Relations**: 'assembly' (part-of), 'location', 'responsibility', 'connection'.
+
+        [Example]
+        Input: ["{{'Item': 'Pump-A', 'Part': 'Seal', 'Location': 'Room-1'}}"]
+        Output: {{
+          "entities": [
+            {{ "name": "Pump-A", "type": "pump", "parent_type": "equipment" }},
+            {{ "name": "Seal", "type": "seal", "parent_type": "component" }},
+            {{ "name": "Room-1", "type": "room", "parent_type": "site" }}
+          ],
+          "relations": [
+            {{ "from": "Seal", "to": "Pump-A", "type": "assembly" }},
+            {{ "from": "Pump-A", "to": "Room-1", "type": "location" }}
+          ]
+        }}
+
+        Return ONLY a JSON object with this structure:
+        {{
+          "entities": [{{ "name": "Pump A", "type": "centrifugal-pump", "parent_type": "equipment" }}],
+          "relations": [{{ "from": "Pump A", "to": "System B", "type": "assembly" }}]
+        }}
+        
+        JSON Data:
+        {json_array_of_rows[:30000]}
+        """ # Limit prompt size
+        try:
+            response = self.llm_client.chat.completions.create(
+                model="Qwen/Qwen2.5-7B-Instruct",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                response_format={ "type": "json_object" }
+            )
+            return json.loads(response.choices[0].message.content)
+        except Exception as e:
+            print(f"⚠️ Batch LLM extraction failed: {e}")
             return {"entities": [], "relations": []}
 
     async def process_file_pipeline(self, file_content: bytes, filename: str):
@@ -139,8 +220,11 @@ class DynamicETL:
         raw_chunks = parse_file_content(file_content, filename)
         
         # [OPTIMIZATION] Create embeddings in parallel
+        # [Fix] 동시 실행 수 제한 (Semaphore) - 임베딩은 비교적 빠르므로 20개
+        sem = asyncio.Semaphore(20)
         async def create_embedding_task(chunk_text):
-            return await asyncio.to_thread(self.get_embedding, chunk_text)
+            async with sem:
+                return await asyncio.to_thread(self.get_embedding, chunk_text)
 
         embedding_tasks = [create_embedding_task(rc['text']) for rc in raw_chunks]
         vectors = await asyncio.gather(*embedding_tasks)
@@ -180,8 +264,11 @@ class DynamicETL:
         raw_chunks = parse_file_content(file_content, filename)
 
         # [OPTIMIZATION] Create embeddings in parallel
+        # [Fix] 동시 실행 수 제한
+        sem = asyncio.Semaphore(20)
         async def create_embedding_task(chunk_text):
-            return await asyncio.to_thread(self.get_embedding, chunk_text)
+            async with sem:
+                return await asyncio.to_thread(self.get_embedding, chunk_text)
 
         embedding_tasks = [create_embedding_task(rc['text']) for rc in raw_chunks]
         vectors = await asyncio.gather(*embedding_tasks)
@@ -230,34 +317,63 @@ class DynamicETL:
         return {"status": "saved", "doc_id": data['doc_id']}
 
     async def _analyze_chunks(self, chunks: List[Dict]) -> Dict:
-        """각 청크에 대해 LLM을 호출하여 엔티티와 관계를 추출"""
+        """각 청크에 대해 LLM을 호출하여 엔티티와 관계를 추출 (엑셀은 배치 처리)"""
         
-        # [OPTIMIZATION] Run graph extraction in parallel
-        async def extract_task(chunk):
-            graph_data = await asyncio.to_thread(self.extract_graph_data, chunk['text'])
-            return chunk['chunk_id'], graph_data
+        tasks = []
+        sem = asyncio.Semaphore(5) # LLM 호출 동시성 제어
 
-        tasks = [extract_task(chunk) for chunk in chunks]
+        # 엑셀 행(table-row)과 일반 텍스트 청크 분리
+        table_row_chunks = [c for c in chunks if c['type'] == 'table-row']
+        other_chunks = [c for c in chunks if c['type'] != 'table-row']
+
+        # 1. 일반 텍스트 청크는 개별적으로 처리
+        for chunk in other_chunks:
+            async def extract_single_task(c):
+                async with sem:
+                    graph_data = await asyncio.to_thread(self.extract_graph_data, c['text'])
+                # 결과를 ( [chunk_id], graph_data ) 튜플로 통일
+                return [c['chunk_id']], graph_data
+            tasks.append(extract_single_task(chunk))
+
+        # 2. 엑셀 행은 배치로 묶어 처리
+        BATCH_SIZE = 30  # [Optimized] 안정성과 속도 균형을 위해 30으로 조정
+        if table_row_chunks:
+            print(f"📊 Batching {len(table_row_chunks)} table rows into batches of {BATCH_SIZE}...")
+        
+        for i in range(0, len(table_row_chunks), BATCH_SIZE):
+            batch = table_row_chunks[i:i+BATCH_SIZE]
+            batch_texts = [c['text'] for c in batch]
+            batch_chunk_ids = [c['chunk_id'] for c in batch]
+            
+            async def extract_batch_task(texts, chunk_ids):
+                async with sem:
+                    # 배치 추출 함수 호출
+                    graph_data = await asyncio.to_thread(self.extract_graph_data_batch, texts)
+                return chunk_ids, graph_data
+            tasks.append(extract_batch_task(batch_texts, batch_chunk_ids))
+
         results = await asyncio.gather(*tasks)
 
         all_entities = {} # name -> {type, parent}
         all_relations = []
         chunk_links = [] # (chunk_id, entity_name)
 
-        for chunk_id, graph_data in results:
+        for chunk_ids, graph_data in results: # chunk_ids는 이제 리스트
             for ent in graph_data.get("entities", []):
                 name = ent.get('name')
                 if not name: continue
                 
                 etype = ent.get('type') or "unknown-entity"
                 
-                # [Filter] 속성(Attribute) 성격의 데이터가 엔티티로 추출되는 것 방지
                 if etype.lower() in {"date", "datetime", "time", "status", "description", "comment", "note", "unknown", "level", "alarm-level", "unnamed-level", "site-equipment"}:
                     continue
 
                 parent = ent.get("parent_type") or "physical-asset"
                 all_entities[name] = {"type": etype, "parent": parent}
-                chunk_links.append((chunk_id, name))
+                
+                # 해당 엔티티를 찾은 모든 청크와 연결
+                for chunk_id in chunk_ids:
+                    chunk_links.append((chunk_id, name))
             
             for rel in graph_data.get("relations", []):
                 all_relations.append(rel)
@@ -399,7 +515,7 @@ class DynamicETL:
         docs = []
         try:
             with self.driver.transaction(self.db_name, TransactionType.READ) as tx:
-                q = 'match $d isa document-file, has name $n, has id-doc-id $id, has created-date $date; fetch { "id": $id, "name": $n, "date": $date };'
+                q = 'match $d isa document-file, has name $n, has id-doc-id $id; optional { $d has created-date $date; }; fetch { "id": $id, "name": $n, "date": $date };'
                 results = tx.query(q)
                 if hasattr(results, 'resolve'): results = results.resolve()
                 for res in results:

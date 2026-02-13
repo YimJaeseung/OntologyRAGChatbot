@@ -21,8 +21,10 @@ build/
 .env
 .env.local
 
+
 GEMINI.md
 
+test_large_upload.py
 generate_data.py
 run_upload.py
 verify_db.py
