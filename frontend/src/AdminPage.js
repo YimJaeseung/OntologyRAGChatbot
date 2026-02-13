@@ -8,8 +8,10 @@ const AdminPage = () => {
   // item 구조: { id: string, file: File, status: 'idle'|'analyzing'|'ready'|'saving'|'saved'|'error', result: object, error: string }
   const [uploadQueue, setUploadQueue] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [clientId] = useState(() => Math.random().toString(36).substr(2, 9));
 
   const API_BASE = "http://localhost:8000/api/admin";
+  const WS_BASE = "ws://localhost:8000/ws";
 
   // 1. 문서 목록 조회
   const fetchDocuments = async () => {
@@ -42,6 +44,24 @@ const AdminPage = () => {
     fetchSchema();
   }, []);
 
+  // WebSocket 연결
+  useEffect(() => {
+    const ws = new WebSocket(`${WS_BASE}/${clientId}`);
+    
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type === 'progress') {
+        setUploadQueue(prev => prev.map(item => 
+          item.id === data.item_id 
+          ? { ...item, progress: data.progress, statusText: data.message } 
+          : item
+        ));
+      }
+    };
+
+    return () => ws.close();
+  }, [clientId]);
+
   // 2. 파일 추가 (드래그 앤 드롭 & 선택)
   const addFiles = (files) => {
     const newItems = Array.from(files).map(file => ({
@@ -49,7 +69,8 @@ const AdminPage = () => {
       file,
       status: 'idle',
       result: null,
-      error: null
+      error: null,
+      progress: 0
     }));
     setUploadQueue(prev => [...prev, ...newItems]);
   };
@@ -76,6 +97,8 @@ const AdminPage = () => {
     updateItemStatus(itemId, 'analyzing');
     const formData = new FormData();
     formData.append("file", item.file);
+    formData.append("client_id", clientId);
+    formData.append("item_id", itemId);
 
     try {
       const res = await fetch(`${API_BASE}/analyze`, {
@@ -121,6 +144,35 @@ const AdminPage = () => {
     }
   };
 
+  // 5. 데이터 저장 (스키마 + 데이터 적재)
+  const saveItem = async (itemId) => {
+    const item = uploadQueue.find(i => i.id === itemId);
+    if (!item || !item.result) return;
+
+    updateItemStatus(itemId, 'saving', { statusText: 'Saving Data...' });
+
+    try {
+      const res = await fetch(`${API_BASE}/save`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(item.result),
+      });
+      if (!res.ok) throw new Error("Save failed");
+
+      updateItemStatus(itemId, 'saved', { statusText: 'Saved to DB' });
+      fetchDocuments(); // 문서 목록 갱신
+      fetchSchema(); // 스키마 트리 갱신
+
+      // [UI/UX] Remove saved item from queue after a delay
+      setTimeout(() => {
+        setUploadQueue(prev => prev.filter(item => item.id !== itemId));
+      }, 2000);
+
+    } catch (err) {
+      updateItemStatus(itemId, 'error', { error: err.message });
+    }
+  };
+
   // 상태 업데이트 헬퍼
   const updateItemStatus = (id, status, extra = {}) => {
     setUploadQueue(prev => prev.map(item => 
@@ -138,14 +190,19 @@ const AdminPage = () => {
   // 5. 문서 삭제
   const handleDelete = async (docId) => {
     if (!window.confirm("Are you sure you want to delete this document?")) return;
+
+    // [UI/UX] Optimistic Update: 즉시 UI에서 제거
+    const originalDocuments = documents;
+    setDocuments(prev => prev.filter(doc => doc.id !== docId));
+
     try {
       const res = await fetch(`${API_BASE}/documents/${docId}`, {
         method: "DELETE",
       });
-      if (res.ok) {
-        fetchDocuments();
-      }
+      if (!res.ok) throw new Error('Deletion failed on server');
     } catch (err) {
+      alert("Failed to delete document. Restoring list.");
+      setDocuments(originalDocuments); // [Rollback] 실패 시 목록 복원
       alert("Failed to delete document");
     }
   };
@@ -187,6 +244,16 @@ const AdminPage = () => {
       }}>
         {s.text}
       </span>
+    );
+  };
+
+  // UI 헬퍼: 프로그레스 바
+  const ProgressBar = ({ progress }) => {
+    if (!progress) return null;
+    return (
+      <div style={{ width: '100%', backgroundColor: '#e0e0e0', borderRadius: '4px', marginTop: '5px', height: '6px' }}>
+        <div style={{ width: `${progress}%`, backgroundColor: '#007bff', height: '100%', borderRadius: '4px', transition: 'width 0.3s' }}></div>
+      </div>
     );
   };
 
@@ -305,13 +372,17 @@ const AdminPage = () => {
                         {item.result && <span style={{ marginLeft: '10px' }}>Found: {Object.keys(item.result.entities).length} types</span>}
                         {item.error && <span style={{ marginLeft: '10px', color: 'red' }}>{item.error}</span>}
                       </div>
+                      {item.status === 'analyzing' && <ProgressBar progress={item.progress} />}
                     </div>
                     <div>
                       {item.status === 'idle' && (
                         <button onClick={() => analyzeItem(item.id)} style={{ marginRight: '5px', cursor: 'pointer' }}>Analyze</button>
                       )}
                       {item.status === 'ready' && (
-                        <button onClick={() => updateSchemaItem(item.id)} style={{ background: '#007bff', color: 'white', border: 'none', padding: "5px 10px", borderRadius: "4px", cursor: "pointer" }}>Update Schema</button>
+                        <div style={{ display: 'flex', gap: '5px' }}>
+                          <button onClick={() => updateSchemaItem(item.id)} style={{ background: '#17a2b8', color: 'white', border: 'none', padding: "5px 10px", borderRadius: "4px", cursor: "pointer" }} title="Only define types, do not insert data">Update Schema Only</button>
+                          <button onClick={() => saveItem(item.id)} style={{ background: '#28a745', color: 'white', border: 'none', padding: "5px 10px", borderRadius: "4px", cursor: "pointer" }} title="Save schema and insert data">Save Data</button>
+                        </div>
                       )}
                     </div>
                   </li>

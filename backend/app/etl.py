@@ -2,13 +2,14 @@ import os
 import uuid
 import asyncio
 import json
+import time
 from datetime import datetime
 from typing import List, Dict, Optional
 
 # TypeDB 3.7 호환 임포트
 from typedb.driver import TypeDB, TransactionType, Credentials, DriverOptions
 from opensearchpy import OpenSearch
-from openai import OpenAI
+from openai import OpenAI, APITimeoutError, APIConnectionError, RateLimitError
 
 # [분리된 모듈 임포트]
 from app.schema import SchemaManager
@@ -191,19 +192,29 @@ class DynamicETL:
         }}
         
         JSON Data:
-        {json_array_of_rows[:30000]}
+        {json_array_of_rows}
         """ # Limit prompt size
-        try:
-            response = self.llm_client.chat.completions.create(
-                model="Qwen/Qwen2.5-7B-Instruct",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                response_format={ "type": "json_object" }
-            )
-            return json.loads(response.choices[0].message.content)
-        except Exception as e:
-            print(f"⚠️ Batch LLM extraction failed: {e}")
-            return {"entities": [], "relations": []}
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = self.llm_client.chat.completions.create(
+                    model="Qwen/Qwen2.5-7B-Instruct",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.1,
+                    response_format={ "type": "json_object" },
+                    timeout=120 
+                )
+                return json.loads(response.choices[0].message.content)
+            except (APITimeoutError, APIConnectionError, RateLimitError) as e:
+                print(f"⚠️ Batch LLM extraction failed (Attempt {attempt+1}/{max_retries}): {e}. Retrying...")
+                time.sleep(2 * (attempt + 1)) # 지수 백오프 대기
+            except Exception as e:
+                print(f"⚠️ Batch LLM extraction failed: {e}")
+                return {"entities": [], "relations": []}
+        
+        print(f"❌ Batch extraction failed after {max_retries} attempts.")
+        return {"entities": [], "relations": []}
 
     async def process_file_pipeline(self, file_content: bytes, filename: str):
         """
@@ -256,7 +267,7 @@ class DynamicETL:
 
         return {"status": "success", "doc_id": doc_id, "chunks": len(chunks), "entities": len(extracted_data['entities'])}
 
-    async def preview_file_analysis(self, file_content: bytes, filename: str):
+    async def preview_file_analysis(self, file_content: bytes, filename: str, progress_callback=None):
         """[Admin] 1단계: 파일 파싱 및 지식 추출 (DB 저장 X)"""
         doc_id = str(uuid.uuid4())
         
@@ -284,7 +295,7 @@ class DynamicETL:
             })
 
         # 2. 지식 추출
-        extracted_data = await self._analyze_chunks(chunks)
+        extracted_data = await self._analyze_chunks(chunks, progress_callback)
         
         return {
             "doc_id": doc_id,
@@ -298,7 +309,8 @@ class DynamicETL:
     def save_analyzed_data(self, data: Dict):
         """[Admin] 2단계: 검토된 데이터 스키마 반영 및 DB 저장"""
         # 1. 스키마 업데이트
-        self._update_schema_definitions(data['entities'], data.get('relations', []))
+        # [Modified] 사용자의 요청으로 저장 시 스키마 업데이트 생략
+        # self._update_schema_definitions(data['entities'], data.get('relations', []))
         
         # 2. 데이터 구조 재조립 (save_to_db 호환)
         extracted_data = {
@@ -316,11 +328,11 @@ class DynamicETL:
         )
         return {"status": "saved", "doc_id": data['doc_id']}
 
-    async def _analyze_chunks(self, chunks: List[Dict]) -> Dict:
+    async def _analyze_chunks(self, chunks: List[Dict], progress_callback=None) -> Dict:
         """각 청크에 대해 LLM을 호출하여 엔티티와 관계를 추출 (엑셀은 배치 처리)"""
         
         tasks = []
-        sem = asyncio.Semaphore(5) # LLM 호출 동시성 제어
+        sem = asyncio.Semaphore(3) # [Optimized] 동시 실행 수를 3으로 줄여 안정성 확보
 
         # 엑셀 행(table-row)과 일반 텍스트 청크 분리
         table_row_chunks = [c for c in chunks if c['type'] == 'table-row']
@@ -336,7 +348,7 @@ class DynamicETL:
             tasks.append(extract_single_task(chunk))
 
         # 2. 엑셀 행은 배치로 묶어 처리
-        BATCH_SIZE = 30  # [Optimized] 안정성과 속도 균형을 위해 30으로 조정
+        BATCH_SIZE = 20 
         if table_row_chunks:
             print(f"📊 Batching {len(table_row_chunks)} table rows into batches of {BATCH_SIZE}...")
         
@@ -352,7 +364,33 @@ class DynamicETL:
                 return chunk_ids, graph_data
             tasks.append(extract_batch_task(batch_texts, batch_chunk_ids))
 
-        results = await asyncio.gather(*tasks)
+        # [New] Progress Tracking
+        total_tasks = len(tasks)
+        completed_tasks = 0
+        print(f"🚀 Starting analysis for {total_tasks} tasks...")
+
+        async def wrap_with_progress(task):
+            nonlocal completed_tasks
+            try:
+                res = await task
+            except Exception as e:
+                print(f"⚠️ Task failed: {e}")
+                res = ([], {"entities": [], "relations": []})
+            
+            completed_tasks += 1
+            if completed_tasks % 5 == 0 or completed_tasks == total_tasks:
+                print(f"⏳ Analysis Progress: {completed_tasks}/{total_tasks} ({(completed_tasks/total_tasks)*100:.1f}%)")
+                
+                # [WebSocket] Send progress update
+                if progress_callback:
+                    try:
+                        await progress_callback((completed_tasks / total_tasks) * 100, f"Analyzing... {completed_tasks}/{total_tasks}")
+                    except Exception as e:
+                        print(f"⚠️ Progress callback failed: {e}")
+            return res
+
+        wrapped_tasks = [wrap_with_progress(t) for t in tasks]
+        results = await asyncio.gather(*wrapped_tasks)
 
         all_entities = {} # name -> {type, parent}
         all_relations = []
@@ -413,6 +451,7 @@ class DynamicETL:
         
         # [Fix] 파일명 내 백슬래시 및 따옴표 이스케이프 처리
         safe_filename = filename.replace('\\', '\\\\').replace("'", "\\'")
+        print(f"💾 Saving document '{safe_filename}' (ID: {doc_id}) to TypeDB...")
 
         with self.driver.transaction(self.db_name, TransactionType.WRITE) as tx:
             # 1. 문서(Document) 생성
@@ -432,7 +471,10 @@ class DynamicETL:
                 tx.query(q_chunk)
                 
                 # OpenSearch 적재
-                self.insert_to_opensearch(chunk['chunk_id'], chunk['text'], chunk['vector'], {"doc_id": doc_id})
+                self.insert_to_opensearch(
+                    chunk['chunk_id'], chunk['text'], chunk['vector'], 
+                    {"doc_id": doc_id, "filename": filename} # [Fix] doc_id를 메타데이터에 포함
+                )
 
             # 엔티티 생성
             for name, info in extracted_data['entities'].items():
@@ -474,7 +516,11 @@ class DynamicETL:
                 if rtype == 'location':
                     queries.append(f'match $f has name "{fname}"; $t has name "{tname}"; insert (located: $f, place: $t) isa {rtype};')
 
-                # Case 3: Generic Connection (source, target) - Default fallback
+                # Case 3: Responsibility (responsible, subject-area)
+                if rtype == 'responsibility':
+                    queries.append(f'match $f has name "{fname}"; $t has name "{tname}"; insert (responsible: $f, subject-area: $t) isa {rtype};')
+
+                # Case 4: Generic Connection (source, target) - Default fallback
                 queries.append(f'match $f has name "{fname}"; $t has name "{tname}"; insert (source: $f, target: $t) isa {rtype};')
                 
                 for q in queries:
@@ -485,29 +531,60 @@ class DynamicETL:
                         pass # 실패하면 다음 패턴 시도
             
             tx.commit()
+        print(f"✅ Document '{filename}' saved successfully.")
 
     def delete_document(self, doc_id: str):
         """[Admin] 문서 및 관련 데이터 삭제"""
+        print(f"🗑️ Deleting document {doc_id}...")
+        
         # 1. TypeDB 삭제 (문서 + 포함된 청크)
         # 주의: 연결된 엔티티(장비 등)는 다른 문서에서도 쓸 수 있으므로 삭제하지 않음
         with self.driver.transaction(self.db_name, TransactionType.WRITE) as tx:
-            q_del = f"""
-            match $d isa document-file, has id-doc-id "{doc_id}";
+            # 1-1. Mention 관계 삭제 (Chunk가 Source인 경우)
+            q_del_mentions = f"""
+            match 
+            $d isa document-file, has id-doc-id "{doc_id}";
+            $c isa content-unit;
             (container: $d, content: $c) isa containment;
-            delete $d, $c;
+            $m (source: $c) isa mention;
+            delete $m;
             """
-            tx.query(q_del)
+            try: tx.query(q_del_mentions)
+            except Exception as e: print(f"⚠️ Error deleting mentions: {e}")
+
+            # 1-2. Chunk 및 Containment 삭제
+            q_del_chunks = f"""
+            match 
+            $d isa document-file, has id-doc-id "{doc_id}";
+            $c isa content-unit;
+            $cont (container: $d, content: $c) isa containment;
+            delete $c, $cont;
+            """
+            try: tx.query(q_del_chunks)
+            except Exception as e: print(f"⚠️ Error deleting chunks: {e}")
+
+            # 1-3. Document 삭제
+            q_del_doc = f"""
+            match $d isa document-file, has id-doc-id "{doc_id}";
+            delete $d;
+            """
+            try: tx.query(q_del_doc)
+            except Exception as e: print(f"⚠️ Error deleting document entity: {e}")
+            
             tx.commit()
 
         # 2. OpenSearch 삭제
-        query = {
-            "query": {
-                "term": {
-                    "metadata.doc_id.keyword": doc_id
-                }
-            }
-        }
-        self.os_client.delete_by_query(index=self.index_name, body=query)
+        # [Fix] doc_id를 기준으로 해당 문서의 모든 청크 삭제
+        try:
+            self.os_client.delete_by_query(
+                index=self.index_name, body={"query": {"term": {"metadata.doc_id.keyword": doc_id}}}
+            )
+        except:
+            # Fallback for text field
+            self.os_client.delete_by_query(
+                index=self.index_name, body={"query": {"match": {"metadata.doc_id": doc_id}}}
+            )
+            
         return {"status": "deleted", "doc_id": doc_id}
 
     def list_documents(self):
@@ -515,17 +592,32 @@ class DynamicETL:
         docs = []
         try:
             with self.driver.transaction(self.db_name, TransactionType.READ) as tx:
-                q = 'match $d isa document-file, has name $n, has id-doc-id $id; optional { $d has created-date $date; }; fetch { "id": $id, "name": $n, "date": $date };'
+                # [Fix] Use attribute projection in fetch to handle optional attributes gracefully
+                q = """
+                match $d isa document-file;
+                fetch { 
+                    "id": $d.id-doc-id, 
+                    "name": $d.name, 
+                    "date": $d.created-date 
+                };
+                """
                 results = tx.query(q)
                 if hasattr(results, 'resolve'): results = results.resolve()
                 for res in results:
-                    # TypeDBJSON is dict-like, and fetch with JSON structure returns primitive values.
-                    doc_id = res.get("id")
-                    name = res.get("name")
-                    date = res.get("date")
+                    # Helper to extract value from potential list or single object
+                    def get_val(field):
+                        raw = res.get(field)
+                        if not raw: return None
+                        item = raw[0] if isinstance(raw, list) and raw else raw
+                        return item.get("value") if isinstance(item, dict) else item
+
+                    doc_id = get_val("id")
+                    name = get_val("name")
+                    date = get_val("date")
+
                     if doc_id:
                         # The date is a datetime object, so we convert it to a string for JSON serialization.
-                        docs.append({"id": doc_id, "name": name, "date": str(date)})
+                        docs.append({"id": doc_id, "name": name, "date": str(date) if date else ""})
             
             print(f"📄 Listed {len(docs)} documents.")
         except Exception as e:

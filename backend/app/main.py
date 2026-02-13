@@ -1,8 +1,10 @@
 import os
 import time
+import json
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, Field
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from typing import List, Dict
+from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect, Form
 from fastapi.middleware.cors import CORSMiddleware
 # [수정] 최신 드라이버 구조에 맞게 import
 from typedb.driver import TypeDB, Credentials, DriverOptions, TransactionType
@@ -31,6 +33,19 @@ def initialize_schema():
                 if not driver.databases.contains(db_name):
                     print(f"✨ Creating database '{db_name}'...")
                     driver.databases.create(db_name)
+                
+                # [Check] 스키마 존재 여부 확인 (document-file 타입 유무로 판단)
+                is_schema_initialized = False
+                try:
+                    with driver.transaction(db_name, TransactionType.READ) as tx:
+                        if tx.concepts.get_entity_type("document-file").resolve():
+                            is_schema_initialized = True
+                except Exception:
+                    pass
+
+                if is_schema_initialized:
+                    print(f"✅ Database '{db_name}' and schema already exist. Skipping schema initialization.")
+                    break
                 
                 # 2. 스키마 파일 로드 및 적재 (항상 실행하여 업데이트 반영)
                 if os.path.exists(schema_path):
@@ -99,6 +114,36 @@ app.add_middleware(
 # ETL 인스턴스 생성
 etl_processor = None
 
+# ---------------------------------------------------------
+# [WebSocket] Connection Manager
+# ---------------------------------------------------------
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[str, WebSocket] = {}
+
+    async def connect(self, websocket: WebSocket, client_id: str):
+        await websocket.accept()
+        self.active_connections[client_id] = websocket
+
+    def disconnect(self, client_id: str):
+        if client_id in self.active_connections:
+            del self.active_connections[client_id]
+
+    async def send_personal_message(self, message: str, client_id: str):
+        if client_id in self.active_connections:
+            await self.active_connections[client_id].send_text(message)
+
+manager = ConnectionManager()
+
+@app.websocket("/ws/{client_id}")
+async def websocket_endpoint(websocket: WebSocket, client_id: str):
+    await manager.connect(websocket, client_id)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(client_id)
+
 @app.post("/api/upload")
 async def upload_document(file: UploadFile = File(...)):
     try:
@@ -131,11 +176,24 @@ async def chat_endpoint(request: ChatRequest):
 # ---------------------------------------------------------
 
 @app.post("/api/admin/analyze")
-async def admin_analyze_file(file: UploadFile = File(...)):
+async def admin_analyze_file(
+    file: UploadFile = File(...), 
+    client_id: str = Form(...), 
+    item_id: str = Form(...)
+):
     """1. 파일 업로드 및 분석 (저장 안함, 미리보기용)"""
     try:
         content = await file.read()
-        result = await etl_processor.preview_file_analysis(content, file.filename)
+        
+        # 진행률 콜백 함수 정의
+        async def progress_callback(progress: float, message: str):
+            msg = json.dumps({
+                "type": "progress", "item_id": item_id, 
+                "progress": progress, "message": message
+            })
+            await manager.send_personal_message(msg, client_id)
+
+        result = await etl_processor.preview_file_analysis(content, file.filename, progress_callback)
         return result
     except Exception as e:
         print(f"Analyze Error: {e}")

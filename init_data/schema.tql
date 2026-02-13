@@ -112,7 +112,8 @@ define
     owns id-location-id,
     owns name,
     plays location:place,
-    plays responsibility:subject-area;
+    plays responsibility:subject-area,
+    plays mention:target;
 
   # === L2: Industry Standards (산업 공통 분류) ===
   entity equipment,
@@ -164,7 +165,8 @@ define
     sub knowledge-resource,
     owns id-chunk-id,
     owns content-text,
-    plays containment:content;
+    plays containment:content,
+    plays mention:source;
 
   # === L3: Business Context (비즈니스 목적별 분류) ===
   
@@ -190,13 +192,11 @@ define
   # 5. 청크 타입 (데이터 형태)
   entity text-chunk,
     sub content-unit,
-    owns page-number,
-    plays mention:source;
+    owns page-number;
 
   entity table-row,
     sub content-unit,
-    owns row-index,
-    plays mention:source;
+    owns row-index;
 
   # --------------------------------------
   # WORLD 3: ACTORS & EVENTS (주체 및 행위)
@@ -211,20 +211,24 @@ define
     plays responsibility:responsible,
     plays maintenance:performer,
     plays reporting:reporter,
-    plays authorship:author;
+    plays authorship:author,
+    plays mention:target;
 
   entity operational-state,
+    owns name,
     owns code-error,
     owns description,
     owns severity,
     plays state-change:defined-state,
     plays reporting:reported-state,
-    plays knowledge-link:related-topic;
+    plays knowledge-link:related-topic,
+    plays mention:target;
 
   entity action,
     owns name,
     owns date-action,
-    plays maintenance:performed-action;
+    plays maintenance:performed-action,
+    plays mention:target;
 
   # === L2 ===
   entity engineer,

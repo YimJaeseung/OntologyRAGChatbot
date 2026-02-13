@@ -163,7 +163,8 @@ class SchemaManager:
             "containment": ("content", "container"),
             "caused-by": ("source", "target"),
             "alarm": ("source", "target"),
-            "manager": ("source", "target")
+            "manager": ("source", "target"),
+            "responsibility": ("responsible", "subject-area")
         }
         
         # 기본값은 source/target
