@@ -64,7 +64,7 @@ async def search_typedb(keywords: list, processor: DynamicETL):
                     # $n(이름)에 대해 like 연산 수행 후, 연결된 텍스트 조회
                     tql = f"""
                     match 
-                    $e isa physical-asset, has name $n;
+                    $e has name $n;
                     $n like "(?i).*{safe_word}.*";
                     (target: $e, source: $c) isa mention;
                     $c has content-text $text;
@@ -77,7 +77,8 @@ async def search_typedb(keywords: list, processor: DynamicETL):
                             query_res = query_res.resolve()
 
                         for res in query_res:
-                            text_val = res.get("text", {}).get("value", "")
+                            # fetch with JSON structure returns primitive values.
+                            text_val = res.get("text")
                             if text_val:
                                 results.append(text_val)
                     except Exception as e:

@@ -12,11 +12,9 @@ define
   attribute code-error, value string;
 
   attribute name, value string;
-  attribute title, value string;
   attribute description, value string;
   attribute content-text, value string;
   attribute file-type, value string;
-  attribute model-name, value string;
   attribute manufacturer, value string;
   attribute unit, value string;
   attribute severity, value string;
@@ -35,7 +33,6 @@ define
   attribute page-number, value integer;    # PDF 페이지 번호
   
   attribute created-date, value datetime;
-  attribute target-model, value string;
   attribute valid-period, value string;
   attribute issuer, value string;
 
@@ -45,7 +42,7 @@ define
     relates part;
 
   relation location,
-    relates located-item,
+    relates located,
     relates place;
 
   relation monitoring,
@@ -102,9 +99,9 @@ define
   entity physical-asset,
     owns name,
     owns id-serial-number,
-    owns model-name,
     owns manufacturer,
-    plays location:located-item,
+    plays location:place,
+    plays location:located,
     plays state-change:affected-asset,
     plays maintenance:target-asset,
     plays mention:target,
@@ -145,7 +142,7 @@ define
 
   # === L1: Abstract Concepts ===
   entity knowledge-resource,
-    owns title,
+    owns name,
     owns created-date,
     plays knowledge-link:source,
     plays maintenance:guide,
@@ -173,8 +170,7 @@ define
   
   # 1. 지침서 (Manual, SOP)
   entity manual,
-    sub document-file,
-    owns target-model;
+    sub document-file;
 
   # 2. 보고서 (Report, Log)
   entity report,
@@ -226,6 +222,7 @@ define
     plays knowledge-link:related-topic;
 
   entity action,
+    owns name,
     owns date-action,
     plays maintenance:performed-action;
 

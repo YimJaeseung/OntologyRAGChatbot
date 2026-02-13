@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
+import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom';
+import AdminPage from './AdminPage';
 
-function App() {
+function ChatPage() {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -62,6 +64,22 @@ function App() {
         <button onClick={sendMessage} style={{ padding: '10px 20px', background: '#28a745', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer' }}>Send</button>
       </div>
     </div>
+  );
+}
+
+function App() {
+  return (
+    <Router>
+      <div style={{ padding: '10px 20px', background: '#f0f2f5', borderBottom: '1px solid #ccc', marginBottom: '20px' }}>
+        <Link to="/" style={{ marginRight: '20px', textDecoration: 'none', fontWeight: 'bold', color: '#333' }}>💬 Chat</Link>
+        <Link to="/admin" style={{ textDecoration: 'none', fontWeight: 'bold', color: '#333' }}>🛠️ Admin</Link>
+      </div>
+      
+      <Routes>
+        <Route path="/" element={<ChatPage />} />
+        <Route path="/admin" element={<AdminPage />} />
+      </Routes>
+    </Router>
   );
 }
 

@@ -1,7 +1,7 @@
 import os
 import time
 from contextlib import asynccontextmanager
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 # [수정] 최신 드라이버 구조에 맞게 import
@@ -103,7 +103,8 @@ etl_processor = None
 async def upload_document(file: UploadFile = File(...)):
     try:
         content = await file.read()
-        result = await etl_processor.process_file(content, file.filename)
+        # [수정] 통합 파이프라인 호출 (업로드 -> 추출 -> 스키마 -> 저장)
+        result = await etl_processor.process_file_pipeline(content, file.filename)
         return result
     except Exception as e:
         print(f"Error processing file: {e}")
@@ -124,3 +125,85 @@ async def chat_endpoint(request: ChatRequest):
     # rag.py의 하이브리드 검색 호출
     answer = await hybrid_search(request.text, etl_processor)
     return {"answer": answer}
+
+# ---------------------------------------------------------
+# [Admin] 관리자 기능 API
+# ---------------------------------------------------------
+
+@app.post("/api/admin/analyze")
+async def admin_analyze_file(file: UploadFile = File(...)):
+    """1. 파일 업로드 및 분석 (저장 안함, 미리보기용)"""
+    try:
+        content = await file.read()
+        result = await etl_processor.preview_file_analysis(content, file.filename)
+        return result
+    except Exception as e:
+        print(f"Analyze Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+class SaveRequest(BaseModel):
+    doc_id: str
+    filename: str
+    chunks: list
+    entities: dict
+    relations: list
+    links: list
+
+@app.post("/api/admin/save")
+async def admin_save_data(data: SaveRequest):
+    """2. 검토 완료된 데이터 저장 (스키마 업데이트 + DB 적재)"""
+    try:
+        result = etl_processor.save_analyzed_data(data.model_dump())
+        return result
+    except Exception as e:
+        print(f"Save Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/admin/schema/update")
+async def admin_update_schema(data: dict):
+    """3. 스키마만 업데이트 (데이터 적재 X)"""
+    try:
+        # [Log] 요청 수신 확인
+        ent_count = len(data.get('entities', {}))
+        rel_count = len(data.get('relations', []))
+        print(f"📥 [Schema Update] Received request: {ent_count} entities, {rel_count} relations")
+
+        # data expects {'entities': ..., 'relations': ...}
+        return etl_processor.update_schema_only(data.get('entities', {}), data.get('relations', []))
+    except Exception as e:
+        print(f"Schema Update Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/documents")
+async def admin_list_documents():
+    """문서 목록 조회"""
+    try:
+        return etl_processor.list_documents()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/schema")
+async def admin_get_schema():
+    """현재 스키마 구조 조회"""
+    try:
+        return etl_processor.get_schema_tree()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/export/json")
+async def admin_export_json():
+    """지식 그래프 전체 내보내기"""
+    try:
+        return etl_processor.export_graph_data()
+    except Exception as e:
+        print(f"Export Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/admin/documents/{doc_id}")
+async def admin_delete_document(doc_id: str):
+    """3. 문서 삭제"""
+    try:
+        return etl_processor.delete_document(doc_id)
+    except Exception as e:
+        print(f"Delete Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
