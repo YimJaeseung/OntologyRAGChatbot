@@ -11,3 +11,4 @@ pdfplumber
 langchain
 langchain-text-splitters
 requests
+websockets

@@ -106,8 +106,10 @@ class DynamicETL:
         - **Equipment**: Physical machines and devices (e.g., Pump, Motor, Robot).
         - **Component**: Parts belonging to equipment (e.g., Bearing, Valve, Cable).
         - **Site**: Physical locations (e.g., Factory, Zone, Room).
-        - **Operator/Manager**: People, teams, or departments (NOT equipment).
-        - **Fault/Alarm**: Error codes, symptoms, or issues.
+        - **Operator**: People or teams who operate equipment.
+        - **Manager**: People or departments responsible for sites or projects.
+        - **Fault**: A malfunction or defect in a component or equipment.
+        - **Alarm**: A signal or warning about a fault or an abnormal condition.
 
         [Rules]
         1. **Entities**: Identify specific L3 types and their L2 parent from: [{valid_types}].
@@ -164,8 +166,11 @@ class DynamicETL:
         - **Equipment**: Physical machines (e.g., Pump, Motor).
         - **Component**: Parts (e.g., Bearing, Valve).
         - **Site**: Locations (e.g., Factory, Zone).
-        - **Operator/Manager**: People/Teams (NOT equipment).
-
+        - **Operator**: People/Teams who operate equipment.
+        - **Manager**: People/Departments responsible for sites or projects.
+        - **Fault**: A malfunction or defect in a component or equipment.
+        - **Alarm**: A signal or warning about a fault or an abnormal condition.
+        
         [Rules]
         1. **Entities**: Extract L3 types and L2 parents from: [{valid_types}].
            - Ignore: Dates, IDs, Part Numbers, Status, Descriptions.
@@ -206,10 +211,10 @@ class DynamicETL:
                     timeout=120 
                 )
                 return json.loads(response.choices[0].message.content)
-            except (APITimeoutError, APIConnectionError, RateLimitError) as e:
-                print(f"⚠️ Batch LLM extraction failed (Attempt {attempt+1}/{max_retries}): {e}. Retrying...")
-                time.sleep(2 * (attempt + 1)) # 지수 백오프 대기
             except Exception as e:
+                print(f"⚠️ Batch LLM extraction failed (Attempt {attempt+1}/{max_retries}): {e}. Retrying...", flush=True)
+                time.sleep(2 * (attempt + 1)) # 지수 백오프 대기
+            except Exception as e: # Catch-all for other unexpected errors during retry loop
                 print(f"⚠️ Batch LLM extraction failed: {e}")
                 return {"entities": [], "relations": []}
         
@@ -270,19 +275,35 @@ class DynamicETL:
     async def preview_file_analysis(self, file_content: bytes, filename: str, progress_callback=None):
         """[Admin] 1단계: 파일 파싱 및 지식 추출 (DB 저장 X)"""
         doc_id = str(uuid.uuid4())
+        print(f"  ➡️ Step 1/3: Parsing file '{filename}'...", flush=True)
         
         # 1. 파싱 및 청킹
         raw_chunks = parse_file_content(file_content, filename)
 
+        print(f"  ➡️ Step 2/3: Creating embeddings for {len(raw_chunks)} chunks...", flush=True)
         # [OPTIMIZATION] Create embeddings in parallel
         # [Fix] 동시 실행 수 제한
         sem = asyncio.Semaphore(20)
-        async def create_embedding_task(chunk_text):
-            async with sem:
-                return await asyncio.to_thread(self.get_embedding, chunk_text)
+        
+        total_embeddings = len(raw_chunks)
+        completed_embeddings = 0
 
-        embedding_tasks = [create_embedding_task(rc['text']) for rc in raw_chunks]
-        vectors = await asyncio.gather(*embedding_tasks)
+        async def create_embedding_task(chunk_text):
+            nonlocal completed_embeddings
+            async with sem:
+                res = await asyncio.to_thread(self.get_embedding, chunk_text)
+            
+            completed_embeddings += 1
+            if completed_embeddings % 100 == 0 or completed_embeddings == total_embeddings:
+                print(f"    🔹 Embedding Progress: {completed_embeddings}/{total_embeddings} ({(completed_embeddings/total_embeddings)*100:.1f}%)", flush=True)
+            return res
+
+        try:
+            embedding_tasks = [create_embedding_task(rc['text']) for rc in raw_chunks]
+            vectors = await asyncio.gather(*embedding_tasks)
+        except Exception as e:
+            print(f"  ❌ Embedding creation failed: {e}", flush=True)
+            raise
 
         chunks = []
         for i, rc in enumerate(raw_chunks):
@@ -294,6 +315,7 @@ class DynamicETL:
                 "vector": vectors[i] # 벡터 생성은 미리 수행
             })
 
+        print(f"  ➡️ Step 3/3: Extracting knowledge from chunks...", flush=True)
         # 2. 지식 추출
         extracted_data = await self._analyze_chunks(chunks, progress_callback)
         
@@ -374,19 +396,19 @@ class DynamicETL:
             try:
                 res = await task
             except Exception as e:
-                print(f"⚠️ Task failed: {e}")
+                print(f"⚠️ Task failed in wrap_with_progress: {e}", flush=True)
                 res = ([], {"entities": [], "relations": []})
             
             completed_tasks += 1
             if completed_tasks % 5 == 0 or completed_tasks == total_tasks:
-                print(f"⏳ Analysis Progress: {completed_tasks}/{total_tasks} ({(completed_tasks/total_tasks)*100:.1f}%)")
+                print(f"⏳ Analysis Progress: {completed_tasks}/{total_tasks} ({(completed_tasks/total_tasks)*100:.1f}%)", flush=True)
                 
                 # [WebSocket] Send progress update
                 if progress_callback:
                     try:
                         await progress_callback((completed_tasks / total_tasks) * 100, f"Analyzing... {completed_tasks}/{total_tasks}")
                     except Exception as e:
-                        print(f"⚠️ Progress callback failed: {e}")
+                        print(f"⚠️ Progress callback failed: {e}", flush=True)
             return res
 
         wrapped_tasks = [wrap_with_progress(t) for t in tasks]

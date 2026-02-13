@@ -178,11 +178,12 @@ async def chat_endpoint(request: ChatRequest):
 @app.post("/api/admin/analyze")
 async def admin_analyze_file(
     file: UploadFile = File(...), 
-    client_id: str = Form(...), 
-    item_id: str = Form(...)
+    client_id: str = Form(default=""), 
+    item_id: str = Form(default="")
 ):
     """1. 파일 업로드 및 분석 (저장 안함, 미리보기용)"""
     try:
+        print(f"🔍 Analyze request received. Client ID: {client_id}, Item ID: {item_id}", flush=True)
         content = await file.read()
         
         # 진행률 콜백 함수 정의

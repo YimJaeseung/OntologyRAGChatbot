@@ -150,6 +150,19 @@ class SchemaManager:
         slug_from = self.sanitize_type_name(from_type)
         slug_to = self.sanitize_type_name(to_type)
         
+        # [Fix] 속성 이름과 충돌하는 경우 엔티티 이름 보정 (예: department -> department-entity)
+        def resolve_entity_name(name):
+            try:
+                with self.driver.transaction(self.db_name, TransactionType.READ) as tx:
+                    if tx.concepts.get_attribute_type(name).resolve():
+                        return f"{name}-entity"
+            except:
+                pass
+            return name
+
+        slug_from = resolve_entity_name(slug_from)
+        slug_to = resolve_entity_name(slug_to)
+
         if not slug_rel or not slug_from or not slug_to:
             return slug_rel
 
