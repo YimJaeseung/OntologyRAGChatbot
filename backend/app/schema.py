@@ -44,6 +44,26 @@ class SchemaManager:
         slug_l3 = self.sanitize_type_name(l3_name)
         slug_parent = self.sanitize_type_name(l2_parent)
         
+        # [Normalization] 약어 및 동의어 표준화 (Entity Resolution)
+        synonyms = {
+            "bkt": "bracket", "brkt": "bracket",
+            "alplate": "al-plate",
+            "photosensor": "photo-micro-sensor",
+            "circuitprotector": "circuit-protection-device"
+        }
+        if slug_l3 in synonyms:
+            slug_l3 = synonyms[slug_l3]
+
+        # [Correction] 특정 L3 타입에 대한 강제 부모 매핑 (LLM 분류 오류 보정)
+        l3_overrides = {
+            "person": "operator", "team": "operator", "group": "manager",
+            "project": "maintenance-activity",
+            "machining": "maintenance-activity", "cutting": "maintenance-activity",
+            "part-number": "component", "material": "component"
+        }
+        if slug_l3 in l3_overrides:
+            slug_parent = l3_overrides[slug_l3]
+
         # [Hierarchy Enforcement] L1 타입을 적절한 L2 타입으로 매핑
         l1_defaults = {
             "physical-asset": "equipment",
@@ -111,6 +131,13 @@ class SchemaManager:
         for l3, parent in type_pairs:
             slug_l3 = self.sanitize_type_name(l3)
             slug_parent = self.sanitize_type_name(parent)
+            
+            # [Batch] 동의어 및 오버라이드 적용 (ensure_l3_type 로직 복제)
+            synonyms = {"bkt": "bracket", "brkt": "bracket", "alplate": "al-plate"}
+            if slug_l3 in synonyms: slug_l3 = synonyms[slug_l3]
+            
+            l3_overrides = {"person": "operator", "team": "operator", "project": "maintenance-activity"}
+            if slug_l3 in l3_overrides: slug_parent = l3_overrides[slug_l3]
             
             # L1 Defaults (ensure_l3_type와 동일 로직)
             l1_defaults = {
@@ -252,7 +279,8 @@ class SchemaManager:
         # 관계 타입 이름을 표준화 (매핑된 키가 있으면 그것 사용)
         if slug_rel in ["part-of", "composition"]:
             slug_rel = "assembly"
-        if slug_rel in ["requester", "responsible", "managed-by"]:
+        # [Fix] 'operator' 관계는 'responsibility'로 매핑하여 엔티티 이름 충돌 방지
+        if slug_rel in ["requester", "responsible", "managed-by", "operator"]:
             slug_rel = "responsibility"
 
         # 1. 존재 확인 및 충돌 처리

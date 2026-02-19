@@ -98,11 +98,21 @@ class DynamicETL:
         """[Level 3] LLM을 통한 엔티티 및 관계 추출"""
         valid_types = ", ".join(self.schema_mgr.valid_parents)
         
-        # [Improvement] Few-shot 예시를 통한 명시적 가이드 (제약조건 나열 대신)
-        prompt = f"""
+        # [Fix] System Prompt 분리 및 스키마 명시
+        system_prompt = """
         You are an expert Industrial Knowledge Graph Engineer.
         Extract structured knowledge from the text into a JSON format.
 
+        Output JSON Schema:
+        {
+          "entities": [ { "name": "string", "type": "string", "parent_type": "string" } ],
+          "relations": [ { "from": "string", "to": "string", "type": "string" } ]
+        }
+        
+        IMPORTANT: 'entities' must be a list of OBJECTS (dictionaries), NOT a list of lists.
+        """
+
+        user_prompt = f"""
         [Definitions]
         - **Equipment**: Physical machines and devices (e.g., Pump, Motor, Robot).
         - **Component**: Parts belonging to equipment (e.g., Bearing, Valve, Cable).
@@ -134,18 +144,15 @@ class DynamicETL:
             {{ "from": "crack", "to": "seal", "type": "caused-by" }}
           ]
         }}
-
-        Return ONLY a JSON object with this structure:
-        {{
-          "entities": [{{ "name": "Pump A", "type": "centrifugal-pump", "parent_type": "equipment" }}],
-          "relations": [{{ "from": "Pump A", "to": "System B", "type": "assembly" }}]
-        }}
         Text: "{text[:2000]}"
         """
         try:
             response = await self.llm_client.chat.completions.create(
                 model="Qwen/Qwen2.5-7B-Instruct",
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
                 temperature=0.1,
                 response_format={ "type": "json_object" }
             )
@@ -162,16 +169,27 @@ class DynamicETL:
         # Combine the JSON strings of rows into a larger JSON array string
         json_array_of_rows = "[" + ",".join(texts) + "]"
         
-        prompt = f"""
+        # [Fix] System Prompt 분리 및 스키마 명시
+        system_prompt = """
         You are an expert Industrial Knowledge Graph Engineer.
         Analyze the JSON array of table rows. Consolidate knowledge into a single graph.
 
+        Output JSON Schema:
+        {
+          "entities": [ { "name": "string", "type": "string", "parent_type": "string" } ],
+          "relations": [ { "from": "string", "to": "string", "type": "string" } ]
+        }
+        
+        IMPORTANT: 'entities' must be a list of OBJECTS (dictionaries), NOT a list of lists.
+        """
+
+        user_prompt = f"""
         [Definitions]
-        - **Equipment**: Physical machines (e.g., Pump, Motor).
-        - **Component**: Parts (e.g., Bearing, Valve).
-        - **Site**: Locations (e.g., Factory, Zone).
-        - **Operator**: People/Teams who operate equipment.
-        - **Manager**: People/Departments responsible for sites or projects.
+        - **Equipment**: Physical machines and devices (e.g., Pump, Motor, Robot).
+        - **Component**: Parts belonging to equipment (e.g., Bearing, Valve, Cable).
+        - **Site**: Physical locations (e.g., Factory, Zone, Room).
+        - **Operator**: People or teams who operate equipment.
+        - **Manager**: People or departments responsible for sites or projects.
         - **Fault**: A malfunction or defect in a component or equipment.
         - **Alarm**: A signal or warning about a fault or an abnormal condition.
         
@@ -193,23 +211,20 @@ class DynamicETL:
             {{ "from": "Pump-A", "to": "Room-1", "type": "location" }}
           ]
         }}
-
-        Return ONLY a JSON object with this structure:
-        {{
-          "entities": [{{ "name": "Pump A", "type": "centrifugal-pump", "parent_type": "equipment" }}],
-          "relations": [{{ "from": "Pump A", "to": "System B", "type": "assembly" }}]
-        }}
         
         JSON Data:
         {json_array_of_rows}
-        """ # Limit prompt size
+        """
         
         max_retries = 3
         for attempt in range(max_retries):
             try:
                 response = await self.llm_client.chat.completions.create(
                     model="Qwen/Qwen2.5-7B-Instruct",
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
                     temperature=0.1,
                     response_format={ "type": "json_object" },
                     timeout=120,
@@ -430,6 +445,11 @@ class DynamicETL:
                 continue
 
             for ent in graph_data.get("entities", []):
+                # [Fix] LLM이 엔티티를 dict가 아닌 list 등으로 잘못 반환하는 경우 방어
+                if not isinstance(ent, dict):
+                    print(f"⚠️ Unexpected entity format: {type(ent)}. Skipping. Value: {str(ent)[:100]}", flush=True)
+                    continue
+
                 name = ent.get('name')
                 if not name: continue
                 
@@ -468,6 +488,11 @@ class DynamicETL:
         # 2. 관계 타입 정의
         if relations:
             for rel in relations:
+                # [Fix] LLM이 관계를 dict가 아닌 list 등으로 잘못 반환하는 경우 방어
+                if not isinstance(rel, dict):
+                    print(f"⚠️ Unexpected relation format: {type(rel)}. Skipping. Value: {str(rel)[:100]}", flush=True)
+                    continue
+
                 from_name = rel.get('from')
                 to_name = rel.get('to')
                 rel_type = rel.get('type')
