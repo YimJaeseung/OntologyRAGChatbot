@@ -58,7 +58,8 @@ class SchemaManager:
         l3_overrides = {
             "person": "operator", "team": "operator", "group": "manager",
             "project": "maintenance-activity",
-            "machining": "maintenance-activity", "cutting": "maintenance-activity",
+            "machining": "maintenance-activity", "cutting": "maintenance-activity", "process": "maintenance-activity",
+            "motion": "maintenance-activity",
             "part-number": "component", "material": "component"
         }
         if slug_l3 in l3_overrides:
@@ -83,23 +84,31 @@ class SchemaManager:
             slug_parent = "document-file"
 
         # 1. 존재 및 충돌 확인
-        with self.driver.transaction(self.db_name, TransactionType.READ) as tx:
-            try:
-                # [Fix] 엔티티 타입인지 명확히 확인 (속성/관계와의 이름 충돌 방지)
-                if tx.concepts.get_entity_type(slug_l3).resolve():
-                     self._known_types.add(slug_l3)
-                     return slug_l3
+        try:
+            with self.driver.transaction(self.db_name, TransactionType.READ) as tx:
+                # [Fix] TypeDB 3.x: Cannot query 'sub entity'. Check existence and type in Python.
+                q = f"match $x sub {slug_l3};"
+                result = tx.query(q).resolve()
                 
-                # [Fix] 속성이나 관계로 이미 존재하는지 확인 -> 존재하면 이름 변경
-                if tx.concepts.get_attribute_type(slug_l3).resolve() or \
-                   tx.concepts.get_relation_type(slug_l3).resolve():
-                    slug_l3 = f"{slug_l3}-entity"
-                    # 변경된 이름이 이미 엔티티로 존재하는지 재확인
-                    if tx.concepts.get_entity_type(slug_l3).resolve():
-                        self._known_types.add(slug_l3)
-                        return slug_l3
-            except Exception: 
-                pass # 타입이 없으면 아래 정의 로직으로 이동
+                if result.is_ok():
+                    concepts = list(result)
+                    if concepts:
+                        # Check if it is an entity type
+                        c = concepts[0].get("x")
+                        if c.is_entity_type():
+                            self._known_types.add(slug_l3)
+                            return slug_l3
+                        else:
+                            # It exists but is not an entity (attribute or relation)
+                            slug_l3 = f"{slug_l3}-entity"
+                            # Check new name
+                            q_new = f"match $x sub {slug_l3};"
+                            res_new = tx.query(q_new).resolve()
+                            if res_new.is_ok() and list(res_new):
+                                self._known_types.add(slug_l3)
+                                return slug_l3
+        except Exception:
+            pass # 타입이 없으면 아래 정의 로직으로 이동
 
         # 2. 없으면 정의 (SCHEMA 트랜잭션)
         print(f"🆕 Defining New L3 Type: '{slug_l3}' (sub {slug_parent})")
@@ -179,22 +188,38 @@ class SchemaManager:
             with self.driver.transaction(self.db_name, TransactionType.READ) as tx:
                 final_definitions = {}
                 for slug, p_slug in definitions_needed.items():
-                    # 1. 이미 엔티티로 존재하면 정의 불필요
-                    if tx.concepts.get_entity_type(slug).resolve():
-                        continue
-                    
-                    # 2. 속성/관계와 이름 충돌 확인
-                    if tx.concepts.get_attribute_type(slug).resolve() or \
-                       tx.concepts.get_relation_type(slug).resolve():
-                        new_slug = f"{slug}-entity"
-                        # resolved_map 업데이트 (중요: 호출자가 변경된 이름을 알 수 있게 함)
-                        for k, v in resolved_map.items():
-                            if v == slug: resolved_map[k] = new_slug
+                    # [Fix] Check existence and type in Python
+                    try:
+                        res = tx.query(f"match $t sub {slug};").resolve()
+                        is_entity = False
+                        is_occupied = False
                         
-                        # 변경된 이름도 없으면 정의 대상에 추가
-                        if not tx.concepts.get_entity_type(new_slug).resolve():
-                            final_definitions[new_slug] = p_slug
-                    else:
+                        if res.is_ok():
+                            concepts = list(res)
+                            if concepts:
+                                is_occupied = True
+                                c = concepts[0].get("t")
+                                if c.is_entity_type():
+                                    is_entity = True
+                        
+                        if is_entity:
+                            continue
+                        
+                        if is_occupied:
+                            new_slug = f"{slug}-entity"
+                            for k, v in resolved_map.items():
+                                if v == slug: resolved_map[k] = new_slug
+                            
+                            try:
+                                res_new = tx.query(f"match $t sub {new_slug};").resolve()
+                                if res_new.is_ok() and list(res_new):
+                                    continue
+                                final_definitions[new_slug] = p_slug
+                            except:
+                                final_definitions[new_slug] = p_slug
+                        else:
+                            final_definitions[slug] = p_slug
+                    except:
                         final_definitions[slug] = p_slug
             
             # 없는 타입 일괄 정의 (Batch Schema Write)
@@ -222,32 +247,23 @@ class SchemaManager:
         with self.driver.transaction(self.db_name, TransactionType.READ) as tx:
             for parent in target_parents:
                 try:
-                    # 해당 부모 타입(L2)의 직계 하위 타입(L3)만 조회 (sub!)
-                    q = f"match $x sub! {parent}; select $x;"
-                    res = tx.query(q)
-                    if hasattr(res, 'resolve'): res = res.resolve()
+                    # [Fix] TypeDB 3.x: Use simple match to get ConceptMaps. 'get' keyword is deprecated.
+                    q = f"match $x sub! {parent};"
+                    res_stream = tx.query(q).resolve()
                     
                     children = []
-                    for r in res:
-                        c = r.get("x")
+                    for cm in res_stream:
+                        c = cm.get("x")
                         if c:
-                            # TypeDB Driver: Concept -> label -> name
-                            # [Fix] 드라이버/객체 버전에 따른 label 접근 방식 호환성 처리
-                            try:
-                                # Standard TypeDB 3.x
-                                name = c.label.name
-                            except AttributeError:
-                                try:
-                                    name = c.get_label().name
-                                except:
-                                    name = str(c).split(':')[-1].strip()
-                            
-                            # [Clean Up] 'EntityType(name)' 형태의 문자열 정리
-                            if name.startswith("EntityType(") and name.endswith(")"):
-                                name = name[11:-1]
-
-                            if name != parent:
+                            label_obj = c.get_label()
+                            # [Fix] Handle cases where get_label() might return a str instead of a Label object
+                            if hasattr(label_obj, 'name') and callable(label_obj.name):
+                                name = label_obj.name()
+                            else:
+                                name = str(label_obj)
+                            if name and name != parent:
                                 children.append(name)
+
                     if children:
                         tree[parent] = sorted(children)
                 except Exception as e:
@@ -268,19 +284,19 @@ class SchemaManager:
         slug_from = self.sanitize_type_name(from_type)
         slug_to = self.sanitize_type_name(to_type)
         
-        # [Fix] 속성 이름과 충돌하는 경우 엔티티 이름 보정 (예: department -> department-entity)
         def resolve_entity_name(name):
-            try:
-                with self.driver.transaction(self.db_name, TransactionType.READ) as tx:
-                    # 이미 엔티티라면 통과
-                    if tx.concepts.get_entity_type(name).resolve():
-                        return name
-                    # 속성이나 관계라면 이름 변경
-                    if tx.concepts.get_attribute_type(name).resolve() or \
-                       tx.concepts.get_relation_type(name).resolve():
-                        return f"{name}-entity"
-            except:
-                pass
+            """Opens a new transaction to resolve name conflicts for entities."""
+            with self.driver.transaction(self.db_name, TransactionType.READ) as tx:
+                try:
+                    res = tx.query(f"match $t sub {name};").resolve()
+                    if res.is_ok():
+                        concepts = list(res)
+                        if concepts:
+                            c = concepts[0].get("t")
+                            if c.is_attribute_type() or c.is_relation_type():
+                                return f"{name}-entity"
+                except:
+                    pass
             return name
 
         slug_from = resolve_entity_name(slug_from)
@@ -288,6 +304,14 @@ class SchemaManager:
 
         if not slug_rel or not slug_from or not slug_to:
             return slug_rel
+
+        # [Fix] 1. 관계 이름 표준화 (Role Mapping 전에 수행해야 올바른 Role을 가져옴)
+        # 관계 타입 이름을 표준화 (매핑된 키가 있으면 그것 사용)
+        if slug_rel in ["part-of", "composition"]:
+            slug_rel = "assembly"
+        # [Fix] 'operator' 관계는 'responsibility'로 매핑하여 엔티티 이름 충돌 방지
+        if slug_rel in ["requester", "responsible", "managed-by", "operator"]:
+            slug_rel = "responsibility"
 
         # 역할 이름 결정 (하드코딩된 매핑 또는 기본값)
         role_map = {
@@ -306,13 +330,6 @@ class SchemaManager:
         # 기본값은 source/target
         role1, role2 = role_map.get(slug_rel, ("source", "target"))
         
-        # 관계 타입 이름을 표준화 (매핑된 키가 있으면 그것 사용)
-        if slug_rel in ["part-of", "composition"]:
-            slug_rel = "assembly"
-        # [Fix] 'operator' 관계는 'responsibility'로 매핑하여 엔티티 이름 충돌 방지
-        if slug_rel in ["requester", "responsible", "managed-by", "operator"]:
-            slug_rel = "responsibility"
-
         # 1. 존재 확인 및 충돌 처리
         # [Fix] 이미 알려진 관계라면 DB 확인 및 이름 변경 스킵
         if slug_rel in self._known_relations:
@@ -320,18 +337,18 @@ class SchemaManager:
         else:
             is_relation = False
             is_occupied = False
-            try:
-                with self.driver.transaction(self.db_name, TransactionType.READ) as tx:
-                    # 존재 여부 확인
-                    q_check = f"match $x sub {slug_rel}; select $x; limit 1;"
-                    if list(tx.query(q_check).resolve()):
-                        is_occupied = True
-                        # 관계 타입인지 확인 (TQL 제약으로 인해 정확한 확인이 어려울 수 있음)
-                        # 여기서는 이름이 점유되었는데 known_relations에 없으면 충돌로 간주할 수도 있으나,
-                        # 안전을 위해 DB에서 추가 확인을 시도하거나, 충돌로 처리
-                        pass
-            except Exception:
-                pass
+            with self.driver.transaction(self.db_name, TransactionType.READ) as tx:
+                try:
+                    res = tx.query(f"match $t sub {slug_rel};").resolve()
+                    if res.is_ok():
+                        concepts = list(res)
+                        if concepts:
+                            is_occupied = True
+                            c = concepts[0].get("t")
+                            if c.is_relation_type():
+                                is_relation = True
+                except Exception as e:
+                    print(f"⚠️ Error checking relation '{slug_rel}': {e}")
                 
             # 이름이 점유되었으나 관계가 아닌 경우 (예: 엔티티와 이름 충돌) -> 이름 변경
             if is_occupied and not is_relation:

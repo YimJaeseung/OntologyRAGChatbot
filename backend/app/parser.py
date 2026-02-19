@@ -4,6 +4,12 @@ import pdfplumber
 from typing import List, Dict
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+def sanitize_text(text: str) -> str:
+    """Remove surrogate characters to prevent encoding errors."""
+    if not isinstance(text, str):
+        return str(text)
+    return text.encode('utf-8', 'ignore').decode('utf-8')
+
 def parse_file_content(file_content: bytes, filename: str) -> List[Dict]:
     """
     파일 내용을 읽어 텍스트 청크 리스트를 반환합니다.
@@ -23,7 +29,7 @@ def parse_file_content(file_content: bytes, filename: str) -> List[Dict]:
             for idx, row in df.iterrows():
                 row_json = row.to_json(force_ascii=False)
                 chunks.append({
-                    "text": str(row_json),
+                    "text": sanitize_text(row_json),
                     "index": idx,
                     "type": "table-row"
                 })
@@ -34,7 +40,7 @@ def parse_file_content(file_content: bytes, filename: str) -> List[Dict]:
             splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=50)
             for idx, text in enumerate(splitter.split_text(full_text)):
                 chunks.append({
-                    "text": text,
+                    "text": sanitize_text(text),
                     "index": idx,
                     "type": "text-chunk"
                 })
@@ -45,7 +51,7 @@ def parse_file_content(file_content: bytes, filename: str) -> List[Dict]:
             splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=50)
             for idx, text in enumerate(splitter.split_text(full_text)):
                 chunks.append({
-                    "text": text,
+                    "text": sanitize_text(text),
                     "index": idx,
                     "type": "text-chunk"
                 })

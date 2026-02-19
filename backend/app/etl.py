@@ -15,6 +15,15 @@ from openai import AsyncOpenAI, APITimeoutError, APIConnectionError, RateLimitEr
 from app.schema import SchemaManager
 from app.parser import parse_file_content
 
+def sanitize_text(text: str) -> str:
+    """
+    Remove surrogate characters and other invalid unicode characters
+    to prevent 'utf-8 codec can't encode character' errors.
+    """
+    if not isinstance(text, str):
+        return text
+    return text.encode('utf-8', 'ignore').decode('utf-8')
+
 # ---------------------------------------------------------
 # 2. Dynamic ETL: 파일 처리 및 데이터 적재
 # ---------------------------------------------------------
@@ -99,17 +108,18 @@ class DynamicETL:
         valid_types = ", ".join(self.schema_mgr.valid_parents)
         
         # [Fix] System Prompt 분리 및 스키마 명시
-        system_prompt = """
-        You are an expert Industrial Knowledge Graph Engineer.
-        Extract structured knowledge from the text into a JSON format.
+        system_prompt = """You are an expert Industrial Knowledge Graph Engineer. Your ONLY output must be a valid JSON object matching the schema. Do not output any other text, explanation, or markdown.
 
         Output JSON Schema:
         {
           "entities": [ { "name": "string", "type": "string", "parent_type": "string" } ],
           "relations": [ { "from": "string", "to": "string", "type": "string" } ]
         }
-        
-        IMPORTANT: 'entities' must be a list of OBJECTS (dictionaries), NOT a list of lists.
+
+        CRITICAL RULES:
+        1. The value for the "entities" key MUST be a list of JSON objects.
+        2. DO NOT use placeholder strings like "type", "name", "entities", or single characters as values.
+        3. The entire response MUST be a single JSON object, starting with '{' and ending with '}'.
         """
 
         # [Prompt Engineering] 구성 요소 분리 (재시도 시 단순화를 위해)
@@ -193,17 +203,18 @@ class DynamicETL:
         json_array_of_rows = "[" + ",".join(texts) + "]"
         
         # [Fix] System Prompt 분리 및 스키마 명시
-        system_prompt = """
-        You are an expert Industrial Knowledge Graph Engineer.
-        Analyze the JSON array of table rows. Consolidate knowledge into a single graph.
+        system_prompt = """You are an expert JSON extraction service. Your ONLY output must be a valid JSON object matching the schema. Do not output any other text, explanation, or markdown.
 
         Output JSON Schema:
         {
           "entities": [ { "name": "string", "type": "string", "parent_type": "string" } ],
           "relations": [ { "from": "string", "to": "string", "type": "string" } ]
         }
-        
-        IMPORTANT: 'entities' must be a list of OBJECTS (dictionaries), NOT a list of lists.
+
+        CRITICAL RULES:
+        1. The value for the "entities" key MUST be a list of JSON objects.
+        2. DO NOT use placeholder strings like "type", "name", "entities", or single characters as values.
+        3. The entire response MUST be a single JSON object, starting with '{' and ending with '}'.
         """
 
         # [Prompt Engineering] 구성 요소 분리
@@ -480,18 +491,38 @@ class DynamicETL:
                 print(f"⚠️ Unexpected graph_data type: {type(graph_data)}. Skipping. Value: {str(graph_data)[:100]}", flush=True)
                 continue
 
-            for ent in graph_data.get("entities", []):
+            # [Fix] Handle potential stringified JSON in entities
+            raw_entities = graph_data.get("entities")
+            if isinstance(raw_entities, str):
+                try:
+                    raw_entities = json.loads(raw_entities)
+                except:
+                    pass
+            
+            if not isinstance(raw_entities, list):
+                raw_entities = []
+
+            for ent in raw_entities:
                 # [Fix] LLM이 엔티티를 dict가 아닌 list 등으로 잘못 반환하는 경우 방어
                 if not isinstance(ent, dict):
                     print(f"⚠️ Unexpected entity format: {type(ent)}. Skipping. Value: {str(ent)[:100]}", flush=True)
                     continue
 
+                # [Fix] Sanitize entity data
+                ent = {k: sanitize_text(v) for k, v in ent.items() if isinstance(v, str)}
+
                 name = ent.get('name')
-                if not name: continue
-                
                 etype = ent.get('type') or "unknown-entity"
                 
-                if etype.lower() in {"date", "datetime", "time", "status", "description", "comment", "note", "unknown", "level", "alarm-level", "unnamed-level", "site-equipment"}:
+                # [New] Filter out meaningless names and types
+                invalid_names = {"unknown", "none", "n/a", "na", "", "unspecified"}
+                invalid_types = {
+                    "date", "datetime", "time", "status", "description", "comment", "note", 
+                    "unknown", "none", "level", "alarm-level", "unnamed-level", "site-equipment",
+                    "unknown-entity", "unspecified"
+                }
+
+                if not name or len(name) > 50 or name.endswith("-type") or name.lower() in invalid_names or etype.lower() in invalid_types:
                     continue
 
                 parent = ent.get("parent_type") or "physical-asset"
@@ -501,7 +532,22 @@ class DynamicETL:
                 for chunk_id in chunk_ids:
                     chunk_links.append((chunk_id, name))
             
-            for rel in graph_data.get("relations", []):
+            # [Fix] Handle potential stringified JSON in relations
+            raw_relations = graph_data.get("relations")
+            if isinstance(raw_relations, str):
+                try:
+                    raw_relations = json.loads(raw_relations)
+                except:
+                    pass
+            
+            if not isinstance(raw_relations, list):
+                raw_relations = []
+
+            for rel in raw_relations:
+                if not isinstance(rel, dict):
+                    continue
+                # [Fix] Sanitize relation data
+                rel = {k: sanitize_text(v) for k, v in rel.items() if isinstance(v, str)}
                 all_relations.append(rel)
         
         return {
@@ -528,6 +574,9 @@ class DynamicETL:
                 if not isinstance(rel, dict):
                     print(f"⚠️ Unexpected relation format: {type(rel)}. Skipping. Value: {str(rel)[:100]}", flush=True)
                     continue
+
+                # [Fix] Sanitize relation data
+                rel = {k: sanitize_text(v) for k, v in rel.items() if isinstance(v, str)}
 
                 from_name = rel.get('from')
                 to_name = rel.get('to')
