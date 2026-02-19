@@ -112,7 +112,8 @@ class DynamicETL:
         IMPORTANT: 'entities' must be a list of OBJECTS (dictionaries), NOT a list of lists.
         """
 
-        user_prompt = f"""
+        # [Prompt Engineering] 구성 요소 분리 (재시도 시 단순화를 위해)
+        definitions = f"""
         [Definitions]
         - **Equipment**: Physical machines and devices (e.g., Pump, Motor, Robot).
         - **Component**: Parts belonging to equipment (e.g., Bearing, Valve, Cable).
@@ -126,6 +127,9 @@ class DynamicETL:
         1. **Entities**: Identify specific L3 types and their L2 parent from: [{valid_types}].
            - Ignore attributes like dates, IDs, status, or generic terms (e.g., "item", "part").
         2. **Relations**: Identify connections like 'assembly' (part-of), 'location' (at), 'responsibility' (by), 'connection'.
+        """
+        
+        example = """
         
         [Example]
         Input: "The Centrifugal Pump (P-101) in Zone A was inspected by the Maintenance Team. Found a crack in the seal."
@@ -144,24 +148,43 @@ class DynamicETL:
             {{ "from": "crack", "to": "seal", "type": "caused-by" }}
           ]
         }}
+        """
+        
+        input_data = f"""
         Text: "{text[:2000]}"
         """
-        try:
-            response = await self.llm_client.chat.completions.create(
-                model="Qwen/Qwen2.5-7B-Instruct",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.1,
-                response_format={ "type": "json_object" }
-            )
-            data = json.loads(response.choices[0].message.content)
-            if not isinstance(data, dict):
-                return {"entities": [], "relations": []}
-            return data
-        except:
-            return {"entities": [], "relations": []}
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # [Retry Strategy] 재시도 시 프롬프트 단순화 (예시 제거) 및 시스템 프롬프트 강화
+                current_system_prompt = system_prompt
+                current_user_prompt = definitions + example + input_data
+                
+                if attempt > 0:
+                    current_system_prompt += "\n\nCRITICAL: Your previous response was invalid JSON. Return ONLY the JSON object. Do not include markdown formatting."
+                    # 예시를 제거하여 프롬프트 단순화 (토큰 절약 및 혼란 방지)
+                    current_user_prompt = definitions + input_data
+
+                response = await self.llm_client.chat.completions.create(
+                    model="Qwen/Qwen2.5-7B-Instruct",
+                    messages=[
+                        {"role": "system", "content": current_system_prompt},
+                        {"role": "user", "content": current_user_prompt}
+                    ],
+                    temperature=0.1,
+                    response_format={ "type": "json_object" }
+                )
+                data = json.loads(response.choices[0].message.content)
+                if not isinstance(data, dict):
+                    raise ValueError("LLM returned non-dict JSON")
+                return data
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    # print(f"⚠️ Extraction failed after {max_retries} attempts: {e}")
+                    return {"entities": [], "relations": []}
+                # 재시도 전 잠시 대기 (비동기)
+                await asyncio.sleep(1)
 
     async def extract_graph_data_batch(self, texts: List[str]) -> Dict:
         """[Level 3] LLM을 통한 여러 행의 엔티티 및 관계 일괄 추출"""
@@ -183,7 +206,8 @@ class DynamicETL:
         IMPORTANT: 'entities' must be a list of OBJECTS (dictionaries), NOT a list of lists.
         """
 
-        user_prompt = f"""
+        # [Prompt Engineering] 구성 요소 분리
+        definitions = f"""
         [Definitions]
         - **Equipment**: Physical machines and devices (e.g., Pump, Motor, Robot).
         - **Component**: Parts belonging to equipment (e.g., Bearing, Valve, Cable).
@@ -197,7 +221,9 @@ class DynamicETL:
         1. **Entities**: Extract L3 types and L2 parents from: [{valid_types}].
            - Ignore: Dates, IDs, Part Numbers, Status, Descriptions.
         2. **Relations**: 'assembly' (part-of), 'location', 'responsibility', 'connection'.
+        """
 
+        example = """
         [Example]
         Input: ["{{'Item': 'Pump-A', 'Part': 'Seal', 'Location': 'Room-1'}}"]
         Output: {{
@@ -211,7 +237,9 @@ class DynamicETL:
             {{ "from": "Pump-A", "to": "Room-1", "type": "location" }}
           ]
         }}
+        """
         
+        input_data = f"""
         JSON Data:
         {json_array_of_rows}
         """
@@ -219,11 +247,19 @@ class DynamicETL:
         max_retries = 3
         for attempt in range(max_retries):
             try:
+                # [Retry Strategy] 재시도 시 프롬프트 단순화
+                current_system_prompt = system_prompt
+                current_user_prompt = definitions + example + input_data
+                
+                if attempt > 0:
+                    current_system_prompt += "\n\nCRITICAL: Your previous response was invalid JSON. Return ONLY the JSON object."
+                    current_user_prompt = definitions + input_data # 예시 제거
+
                 response = await self.llm_client.chat.completions.create(
                     model="Qwen/Qwen2.5-7B-Instruct",
                     messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
+                        {"role": "system", "content": current_system_prompt},
+                        {"role": "user", "content": current_user_prompt}
                     ],
                     temperature=0.1,
                     response_format={ "type": "json_object" },
