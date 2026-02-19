@@ -96,6 +96,72 @@ class SchemaManager:
                 print(f"❌ Failed to define alternative type. Fallback to {slug_parent}")
                 return slug_parent
 
+    def ensure_l3_types_batch(self, type_pairs: list) -> dict:
+        """
+        [Optimization] 배치 단위로 L3 타입을 확인하고 정의하여 트랜잭션 오버헤드 감소
+        Args:
+            type_pairs: List of (l3_name, l2_parent) tuples
+        Returns:
+            Dict mapping (l3_name, l2_parent) -> final_slug
+        """
+        resolved_map = {}
+        definitions_needed = {} # slug -> parent_slug
+
+        # 1. 메모리 캐시 확인 및 전처리
+        for l3, parent in type_pairs:
+            slug_l3 = self.sanitize_type_name(l3)
+            slug_parent = self.sanitize_type_name(parent)
+            
+            # L1 Defaults (ensure_l3_type와 동일 로직)
+            l1_defaults = {
+                "physical-asset": "equipment",
+                "person": "operator",
+                "event": "maintenance-activity",
+                "content": "document-file",
+                "content-unit": "document-file"
+            }
+            if slug_parent in l1_defaults:
+                slug_parent = l1_defaults[slug_parent]
+            
+            # 이미 확인된 타입이면 스킵
+            if slug_l3 in self._known_types or slug_l3 == slug_parent:
+                resolved_map[(l3, parent)] = slug_l3
+                continue
+
+            if slug_parent not in self.valid_parents:
+                slug_parent = "document-file"
+            
+            resolved_map[(l3, parent)] = slug_l3
+            if slug_l3 not in definitions_needed:
+                definitions_needed[slug_l3] = slug_parent
+
+        if not definitions_needed:
+            return resolved_map
+
+        # 2. DB 존재 여부 확인 및 일괄 정의
+        try:
+            # 존재하지 않는 타입만 필터링 (Batch Read)
+            with self.driver.transaction(self.db_name, TransactionType.READ) as tx:
+                missing_slugs = {slug: p_slug for slug, p_slug in definitions_needed.items() 
+                                 if not list(tx.query(f"match $x sub {slug}; select $x; limit 1;").resolve())}
+            
+            # 없는 타입 일괄 정의 (Batch Schema Write)
+            if missing_slugs:
+                print(f"🆕 Batch Defining {len(missing_slugs)} New L3 Types...")
+                with self.driver.transaction(self.db_name, TransactionType.SCHEMA) as tx:
+                    for slug, p_slug in missing_slugs.items():
+                        tx.query(f"define entity {slug}, sub {p_slug};")
+                    tx.commit()
+                self._known_types.update(missing_slugs.keys())
+                
+        except Exception as e:
+            print(f"⚠️ Batch definition failed: {e}. Fallback to individual definition.")
+            # 실패 시 개별 처리로 폴백
+            for l3, parent in type_pairs:
+                resolved_map[(l3, parent)] = self.ensure_l3_type(l3, parent)
+
+        return resolved_map
+
     def get_schema_tree(self) -> dict:
         """현재 정의된 스키마 계층 구조(L2 -> L3)를 조회"""
         tree = {}

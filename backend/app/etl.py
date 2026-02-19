@@ -9,7 +9,7 @@ from typing import List, Dict, Optional
 # TypeDB 3.7 호환 임포트
 from typedb.driver import TypeDB, TransactionType, Credentials, DriverOptions
 from opensearchpy import OpenSearch
-from openai import OpenAI, APITimeoutError, APIConnectionError, RateLimitError
+from openai import AsyncOpenAI, APITimeoutError, APIConnectionError, RateLimitError
 
 # [분리된 모듈 임포트]
 from app.schema import SchemaManager
@@ -33,7 +33,7 @@ class DynamicETL:
             http_auth=None, use_ssl=False
         )
         self.index_name = "rag-docs"
-        self.llm_client = OpenAI(
+        self.llm_client = AsyncOpenAI(
             base_url=os.getenv("VLLM_API_URL", "http://100.111.233.70:8000/v1"),
             api_key="EMPTY"
         )
@@ -68,12 +68,13 @@ class DynamicETL:
         self.driver.close()
         self.os_client.close()
 
-    def get_embedding(self, text: str) -> List[float]:
+    async def get_embedding(self, text: str) -> List[float]:
         try:
-            return self.llm_client.embeddings.create(
+            response = await self.llm_client.embeddings.create(
                 input=[text.replace("\n", " ")], 
                 model="text-embedding-3-small"
-            ).data[0].embedding
+            )
+            return response.data[0].embedding
         except:
             return [0.0] * 1536 
 
@@ -93,7 +94,7 @@ class DynamicETL:
 
 
 
-    def extract_graph_data(self, text: str) -> Dict:
+    async def extract_graph_data(self, text: str) -> Dict:
         """[Level 3] LLM을 통한 엔티티 및 관계 추출"""
         valid_types = ", ".join(self.schema_mgr.valid_parents)
         
@@ -142,17 +143,20 @@ class DynamicETL:
         Text: "{text[:2000]}"
         """
         try:
-            response = self.llm_client.chat.completions.create(
+            response = await self.llm_client.chat.completions.create(
                 model="Qwen/Qwen2.5-7B-Instruct",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
                 response_format={ "type": "json_object" }
             )
-            return json.loads(response.choices[0].message.content)
+            data = json.loads(response.choices[0].message.content)
+            if not isinstance(data, dict):
+                return {"entities": [], "relations": []}
+            return data
         except:
             return {"entities": [], "relations": []}
 
-    def extract_graph_data_batch(self, texts: List[str]) -> Dict:
+    async def extract_graph_data_batch(self, texts: List[str]) -> Dict:
         """[Level 3] LLM을 통한 여러 행의 엔티티 및 관계 일괄 추출"""
         valid_types = ", ".join(self.schema_mgr.valid_parents)
         # Combine the JSON strings of rows into a larger JSON array string
@@ -203,20 +207,20 @@ class DynamicETL:
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                response = self.llm_client.chat.completions.create(
+                response = await self.llm_client.chat.completions.create(
                     model="Qwen/Qwen2.5-7B-Instruct",
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.1,
                     response_format={ "type": "json_object" },
                     timeout=120 
                 )
-                return json.loads(response.choices[0].message.content)
+                data = json.loads(response.choices[0].message.content)
+                if not isinstance(data, dict):
+                    raise ValueError("LLM returned non-dict JSON")
+                return data
             except Exception as e:
                 print(f"⚠️ Batch LLM extraction failed (Attempt {attempt+1}/{max_retries}): {e}. Retrying...", flush=True)
-                time.sleep(2 * (attempt + 1)) # 지수 백오프 대기
-            except Exception as e: # Catch-all for other unexpected errors during retry loop
-                print(f"⚠️ Batch LLM extraction failed: {e}")
-                return {"entities": [], "relations": []}
+                await asyncio.sleep(2 * (attempt + 1)) # [Fix] 비동기 sleep으로 변경하여 이벤트 루프 블로킹 방지
         
         print(f"❌ Batch extraction failed after {max_retries} attempts.")
         return {"entities": [], "relations": []}
@@ -240,7 +244,7 @@ class DynamicETL:
         sem = asyncio.Semaphore(20)
         async def create_embedding_task(chunk_text):
             async with sem:
-                return await asyncio.to_thread(self.get_embedding, chunk_text)
+                return await self.get_embedding(chunk_text)
 
         embedding_tasks = [create_embedding_task(rc['text']) for rc in raw_chunks]
         vectors = await asyncio.gather(*embedding_tasks)
@@ -291,7 +295,7 @@ class DynamicETL:
         async def create_embedding_task(chunk_text):
             nonlocal completed_embeddings
             async with sem:
-                res = await asyncio.to_thread(self.get_embedding, chunk_text)
+                res = await self.get_embedding(chunk_text)
             
             completed_embeddings += 1
             if completed_embeddings % 100 == 0 or completed_embeddings == total_embeddings:
@@ -354,7 +358,7 @@ class DynamicETL:
         """각 청크에 대해 LLM을 호출하여 엔티티와 관계를 추출 (엑셀은 배치 처리)"""
         
         tasks = []
-        sem = asyncio.Semaphore(10) # [Optimized] 동시 실행 수를 3으로 줄여 안정성 확보
+        sem = asyncio.Semaphore(5) # [Optimized] 서버 부하 감소를 위해 동시 실행 수 추가 감소
 
         # 엑셀 행(table-row)과 일반 텍스트 청크 분리
         table_row_chunks = [c for c in chunks if c['type'] == 'table-row']
@@ -364,13 +368,13 @@ class DynamicETL:
         for chunk in other_chunks:
             async def extract_single_task(c):
                 async with sem:
-                    graph_data = await asyncio.to_thread(self.extract_graph_data, c['text'])
+                    graph_data = await self.extract_graph_data(c['text'])
                 # 결과를 ( [chunk_id], graph_data ) 튜플로 통일
                 return [c['chunk_id']], graph_data
             tasks.append(extract_single_task(chunk))
 
         # 2. 엑셀 행은 배치로 묶어 처리
-        BATCH_SIZE = 50 
+        BATCH_SIZE = 15 # [Optimized] 타임아웃 방지를 위해 배치 크기 추가 감소
         if table_row_chunks:
             print(f"📊 Batching {len(table_row_chunks)} table rows into batches of {BATCH_SIZE}...")
         
@@ -382,7 +386,7 @@ class DynamicETL:
             async def extract_batch_task(texts, chunk_ids):
                 async with sem:
                     # 배치 추출 함수 호출
-                    graph_data = await asyncio.to_thread(self.extract_graph_data_batch, texts)
+                    graph_data = await self.extract_graph_data_batch(texts)
                 return chunk_ids, graph_data
             tasks.append(extract_batch_task(batch_texts, batch_chunk_ids))
 
@@ -446,10 +450,14 @@ class DynamicETL:
 
     def _update_schema_definitions(self, entities: Dict, relations: List[Dict] = None):
         """추출된 엔티티 타입을 확인하고 필요 시 스키마 업데이트"""
-        # 1. 엔티티 타입 정의
+        # 1. 엔티티 타입 정의 (Batch Optimization)
+        type_pairs = [(info['type'], info['parent']) for info in entities.values()]
+        resolved_types = self.schema_mgr.ensure_l3_types_batch(type_pairs)
+        
         for name, info in entities.items():
-            # [Fix] Update type with the actual sanitized/renamed type returned by schema manager
-            info['type'] = self.schema_mgr.ensure_l3_type(info['type'], info['parent'])
+            key = (info['type'], info['parent'])
+            if key in resolved_types:
+                info['type'] = resolved_types[key]
             
         # 2. 관계 타입 정의
         if relations:

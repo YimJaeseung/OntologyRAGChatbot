@@ -13,7 +13,7 @@ async def analyze_query(user_query: str, processor: DynamicETL):
     Example: ["Pump-A", "Sensor-01"]
     """
     # processor의 llm_client 사용
-    response = processor.llm_client.chat.completions.create(
+    response = await processor.llm_client.chat.completions.create(
         model="Qwen/Qwen2.5-7B-Instruct",
         messages=[{"role": "user", "content": prompt}],
         temperature=0
@@ -28,7 +28,7 @@ async def analyze_query(user_query: str, processor: DynamicETL):
 async def search_opensearch(query_text: str, processor: DynamicETL, top_k: int = 3):
     """벡터 유사도 기반의 비정형 청크 검색"""
     # processor의 메서드 및 클라이언트 활용
-    query_vector = processor.get_embedding(query_text)
+    query_vector = await processor.get_embedding(query_text)
     
     search_query = {
         "size": top_k,
@@ -122,7 +122,7 @@ async def hybrid_search(user_query: str, processor: DynamicETL):
     [Answer]
     """
     
-    response = processor.llm_client.chat.completions.create(
+    response = await processor.llm_client.chat.completions.create(
     model="Qwen/Qwen2.5-7B-Instruct",
     messages=[
         {
