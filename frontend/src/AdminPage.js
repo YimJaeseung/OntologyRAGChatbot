@@ -365,7 +365,7 @@ const AdminPage = () => {
               <ul style={{ listStyle: 'none', padding: 0 }}>
                 {uploadQueue.map(item => (
                   <li key={item.id} style={{ background: 'white', border: '1px solid #eee', marginBottom: '8px', padding: '10px', borderRadius: '4px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div>
+                    <div style={{ flex: 1, marginRight: '10px', overflow: 'hidden' }}>
                       <div style={{ fontWeight: 'bold' }}>{item.file.name}</div>
                       <div style={{ fontSize: '0.85em', color: '#666', marginTop: '4px' }}>
                         {getStatusBadge(item.status)}

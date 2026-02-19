@@ -16,7 +16,6 @@ define
   attribute content-text, value string;
   attribute file-type, value string;
   attribute manufacturer, value string;
-  attribute unit, value string;
   attribute severity, value string;
   attribute timestamp, value datetime;
   attribute date-action, value datetime;
@@ -24,8 +23,7 @@ define
   attribute email, value string;
   attribute phone, value string;
   attribute role-grade, value string;
-  attribute department, value string;
-  
+
   attribute version, value string;
   attribute language, value string;
   attribute status, value string;       # Draft, Published, Archived
@@ -126,7 +124,6 @@ define
 
   entity sensor,
     sub physical-asset,
-    owns unit,
     plays monitoring:observer;
 
   entity site, sub space;
@@ -136,6 +133,7 @@ define
   # 예시: 특정 회사의 설비 유형
   # entity pump, sub equipment;
   # entity motor, sub component;
+  entity unit, sub equipment;
 
   # --------------------------------------
   # WORLD 2: DOCUMENT WORLD (지식 자산)
@@ -233,16 +231,17 @@ define
   # === L2 ===
   entity engineer,
     sub party,
-    owns role-grade,
-    owns department;
+    owns role-grade;
 
   entity operator,
-    sub party,
-    owns department;
+    sub party;
 
   entity manager,
-    sub party,
-    owns department;
+    sub party;
+
+  entity department,
+    sub party;
+  
 
   entity fault, sub operational-state;
   entity alarm, sub operational-state;

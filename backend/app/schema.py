@@ -85,11 +85,19 @@ class SchemaManager:
         # 1. 존재 및 충돌 확인
         with self.driver.transaction(self.db_name, TransactionType.READ) as tx:
             try:
-                # [Fix] concepts API 대신 쿼리로 존재 확인
-                q_check = f"match $x sub {slug_l3}; select $x; limit 1;"
-                if list(tx.query(q_check).resolve()):
+                # [Fix] 엔티티 타입인지 명확히 확인 (속성/관계와의 이름 충돌 방지)
+                if tx.concepts.get_entity_type(slug_l3).resolve():
                      self._known_types.add(slug_l3)
                      return slug_l3
+                
+                # [Fix] 속성이나 관계로 이미 존재하는지 확인 -> 존재하면 이름 변경
+                if tx.concepts.get_attribute_type(slug_l3).resolve() or \
+                   tx.concepts.get_relation_type(slug_l3).resolve():
+                    slug_l3 = f"{slug_l3}-entity"
+                    # 변경된 이름이 이미 엔티티로 존재하는지 재확인
+                    if tx.concepts.get_entity_type(slug_l3).resolve():
+                        self._known_types.add(slug_l3)
+                        return slug_l3
             except Exception: 
                 pass # 타입이 없으면 아래 정의 로직으로 이동
 
@@ -169,17 +177,34 @@ class SchemaManager:
         try:
             # 존재하지 않는 타입만 필터링 (Batch Read)
             with self.driver.transaction(self.db_name, TransactionType.READ) as tx:
-                missing_slugs = {slug: p_slug for slug, p_slug in definitions_needed.items() 
-                                 if not list(tx.query(f"match $x sub {slug}; select $x; limit 1;").resolve())}
+                final_definitions = {}
+                for slug, p_slug in definitions_needed.items():
+                    # 1. 이미 엔티티로 존재하면 정의 불필요
+                    if tx.concepts.get_entity_type(slug).resolve():
+                        continue
+                    
+                    # 2. 속성/관계와 이름 충돌 확인
+                    if tx.concepts.get_attribute_type(slug).resolve() or \
+                       tx.concepts.get_relation_type(slug).resolve():
+                        new_slug = f"{slug}-entity"
+                        # resolved_map 업데이트 (중요: 호출자가 변경된 이름을 알 수 있게 함)
+                        for k, v in resolved_map.items():
+                            if v == slug: resolved_map[k] = new_slug
+                        
+                        # 변경된 이름도 없으면 정의 대상에 추가
+                        if not tx.concepts.get_entity_type(new_slug).resolve():
+                            final_definitions[new_slug] = p_slug
+                    else:
+                        final_definitions[slug] = p_slug
             
             # 없는 타입 일괄 정의 (Batch Schema Write)
-            if missing_slugs:
-                print(f"🆕 Batch Defining {len(missing_slugs)} New L3 Types...")
+            if final_definitions:
+                print(f"🆕 Batch Defining {len(final_definitions)} New L3 Types...")
                 with self.driver.transaction(self.db_name, TransactionType.SCHEMA) as tx:
-                    for slug, p_slug in missing_slugs.items():
+                    for slug, p_slug in final_definitions.items():
                         tx.query(f"define entity {slug}, sub {p_slug};")
                     tx.commit()
-                self._known_types.update(missing_slugs.keys())
+                self._known_types.update(final_definitions.keys())
                 
         except Exception as e:
             print(f"⚠️ Batch definition failed: {e}. Fallback to individual definition.")
@@ -247,7 +272,12 @@ class SchemaManager:
         def resolve_entity_name(name):
             try:
                 with self.driver.transaction(self.db_name, TransactionType.READ) as tx:
-                    if tx.concepts.get_attribute_type(name).resolve():
+                    # 이미 엔티티라면 통과
+                    if tx.concepts.get_entity_type(name).resolve():
+                        return name
+                    # 속성이나 관계라면 이름 변경
+                    if tx.concepts.get_attribute_type(name).resolve() or \
+                       tx.concepts.get_relation_type(name).resolve():
                         return f"{name}-entity"
             except:
                 pass
