@@ -212,7 +212,8 @@ class DynamicETL:
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.1,
                     response_format={ "type": "json_object" },
-                    timeout=120 
+                    timeout=120,
+                    max_tokens=4096 # [Fix] 응답 잘림 방지를 위해 최대 토큰 수 명시
                 )
                 data = json.loads(response.choices[0].message.content)
                 if not isinstance(data, dict):
@@ -374,7 +375,7 @@ class DynamicETL:
             tasks.append(extract_single_task(chunk))
 
         # 2. 엑셀 행은 배치로 묶어 처리
-        BATCH_SIZE = 15 # [Optimized] 타임아웃 방지를 위해 배치 크기 추가 감소
+        BATCH_SIZE = 10 # [Optimized] 응답 잘림 및 타임아웃 방지를 위해 배치 크기 추가 감소
         if table_row_chunks:
             print(f"📊 Batching {len(table_row_chunks)} table rows into batches of {BATCH_SIZE}...")
         
@@ -423,6 +424,11 @@ class DynamicETL:
         chunk_links = [] # (chunk_id, entity_name)
 
         for chunk_ids, graph_data in results: # chunk_ids는 이제 리스트
+            # [Fix] graph_data가 딕셔너리가 아닌 경우(예: 에러 문자열) 방어 코드 추가
+            if not isinstance(graph_data, dict):
+                print(f"⚠️ Unexpected graph_data type: {type(graph_data)}. Skipping. Value: {str(graph_data)[:100]}", flush=True)
+                continue
+
             for ent in graph_data.get("entities", []):
                 name = ent.get('name')
                 if not name: continue
