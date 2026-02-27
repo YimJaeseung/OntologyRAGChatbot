@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(PYTHONUTF8=1 \"C:/Users/SOLKO1/anaconda3/envs/rag-system/python.exe\" -c \":*)",
+      "Bash(PYTHONUTF8=1 PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \"C:/Users/SOLKO1/anaconda3/envs/rag-system/python.exe\" -c \":*)",
+      "Bash(PYTHONUTF8=1 \"C:/Users/SOLKO1/anaconda3/envs/rag-system/python.exe\" test_pdf_extract.py)",
+      "Bash(PYTHONUTF8=1 \"C:/Users/SOLKO1/anaconda3/envs/rag-system/python.exe\" -m pip install \"numpy==1.26.4\" \"paddlepaddle==2.6.2\" \"paddleocr==2.7.3\" --no-deps)",
+      "Bash(PYTHONUTF8=1 \"C:/Users/SOLKO1/anaconda3/envs/rag-system/python.exe\" -m pip install \"protobuf==3.20.3\")",
+      "Bash(PYTHONUTF8=1 PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python \"C:/Users/SOLKO1/anaconda3/envs/rag-system/python.exe\" -c \":*)",
+      "Bash(PYTHONUTF8=1 \"C:/Users/SOLKO1/anaconda3/envs/rag-system/python.exe\" -m pip install \"protobuf==3.20.2\" astor)",
+      "Bash(python -c \"import sys; sys.path.insert\\(0, ''C:/Users/SOLKO1/anaconda3/envs/rag-system/Lib/site-packages/''\\); [print\\(name\\) for name in [''kiwipiepy'', ''pykospacing'', ''py_hanspell'', ''soynlp''] if __import__\\(''importlib.util''\\).util.find_spec\\(name\\)]\")",
+      "Bash(curl -s --connect-timeout 5 http://192.168.1.208:8000/v1/models)",
+      "Bash(ping -n 2 192.168.1.208)",
+      "Bash(curl -s --connect-timeout 8 http://192.168.1.208:8000/v1/models)",
+      "Bash(\"C:/Users/SOLKO1/anaconda3/envs/rag-system/python.exe\" -c \"import cv2; print\\(cv2.__version__\\)\")"
+    ]
+  }
+}

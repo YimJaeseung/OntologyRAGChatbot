@@ -34,3 +34,7 @@ sample_pump_manual.pdf
 sensor_catalog.xlsx
 
 node_modules/
+
+/data
+
+CLAUDE.md
